@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { CastFn } from '../collision/collision-world';
 import { MAX_SUBSTEP_TRAVEL, MAX_SUBSTEPS } from './constants';
 import { MoveInput, Outcome, step } from './mover';
+import { notePhase } from './move-phases';
 import { PlayerMoveState } from './player-state';
 import {
   breachStep, SWIM_BACK_SPEED, SWIM_SPEED, SwimOutcome, swimStep, updateSwimming,
@@ -66,7 +67,11 @@ export function movementFrame(
   dt: number,
   now: number,
 ): FrameResult {
+  // PHASE TIMING -- see `move-phases.ts` on the 100 us clock and why these accumulate.
+  const tFrame = performance.now();
+  const tSurface = tFrame;
   const surfaceZ = deps.surfaceAt(state.pos);
+  notePhase('surfaceAt', (performance.now() - tSurface) * 1000);
   updateSwimming(state, surfaceZ, now);
 
   if (!state.swimming) {
@@ -102,7 +107,9 @@ export function movementFrame(
     );
 
     if (substeps === 1) {
-      return { outcome: step(state, deps.cast, input, dt, now, deps.depenetrate), swim: null };
+      const outcome = step(state, deps.cast, input, dt, now, deps.depenetrate);
+      notePhase('total', (performance.now() - tFrame) * 1000);
+      return { outcome, swim: null };
     }
 
     const slice = dt / substeps;
@@ -117,6 +124,7 @@ export function movementFrame(
         jumped: outcome.jumped || next.jumped,
       };
     }
+    notePhase('total', (performance.now() - tFrame) * 1000);
     return { outcome, swim: null };
   }
 
@@ -130,6 +138,7 @@ export function movementFrame(
     state.fallStartZ = state.pos.z;
     state.fallFar = false;
 
+    notePhase('total', (performance.now() - tFrame) * 1000);
     return { outcome, swim: null };
   }
 
@@ -167,6 +176,7 @@ export function movementFrame(
 
   const swim = swimStep(state, deps.cast, inputVel, surfaceZ, deps.surfaceAt, dt);
 
+  notePhase('total', (performance.now() - tFrame) * 1000);
   return {
     outcome: {
       held: state.settling,

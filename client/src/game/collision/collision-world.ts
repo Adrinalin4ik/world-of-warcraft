@@ -178,13 +178,39 @@ export function noteMovementFrame(ms?: number): void {
   }
 }
 
-/** Median of a numeric ring, or null when it is empty. Sorts a copy; called from a console only. */
-function median(values: readonly number[]): number | null {
+/**
+ * The movement phase census, injected rather than imported.
+ *
+ * `game/movement` already imports `CastFn` from this module, so importing the phase census the other
+ * way would close a cycle. A registered sink is the pattern this codebase uses for exactly that --
+ * `movement/outbound.ts#setMovementSink`, `classes/cast-cancel.ts#setCastBarTeardown` -- and it keeps
+ * `moveProfile()` a single paste rather than two commands the owner has to correlate.
+ */
+let movePhases: {
+  read: (frames: number) => Record<string, unknown>;
+  reset: () => void;
+} | null = null;
+
+export function setMovePhaseSource(source: typeof movePhases): void {
+  movePhases = source;
+}
+
+/**
+ * Mean of a numeric ring, or null when it is empty.
+ *
+ * A mean and not a median, for the reason `gatherUs` gives at length: the clock here is quantised to
+ * 100 us, so a median of sub-100-us samples reports the quantum and a mean converges on the value.
+ * `ctlMoveMs` is in MILLISECONDS and is ~4.6, so 100 us is a 2% resolution on it -- fine either way.
+ */
+function mean(values: readonly number[]): number | null {
   if (values.length === 0) {
     return null;
   }
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
+  let total = 0;
+  for (const v of values) {
+    total += v;
+  }
+  return total / values.length;
 }
 
 /**
@@ -227,9 +253,23 @@ function readMoveProfile() {
     registeredChunks: t.size,
     frames: castCensus.frames,
 
-    // THE HEADLINE PAIR.
-    gatherUs: round2(median(t.census.us)),
-    ctlMoveMs: round2(median(castCensus.moveMs)),
+    /**
+     * **A MEAN, NOT A MEDIAN -- and the median was a defect in this instrument.**
+     *
+     * `performance.now()` on the owner's browser is quantised to **100 us**. Every single-gather
+     * sample therefore reads either `0` or `100`, so a MEDIAN of them reads 0 or exactly 100 and
+     * measures the clock rather than the gather -- which is precisely what came back: `0` on a
+     * 2203-frame arm and exactly `100` on two shorter ones. A mean over the accumulated sum
+     * converges instead, because which side of a 100 us boundary a call lands on is unbiased across
+     * many calls.
+     *
+     * Even so this cannot resolve better than about `100 / sqrt(samples)` us, so it is reported
+     * alongside `perGather.chunksVisited`, which is exact and needs no clock at all.
+     */
+    gatherUs: t.census.gathers === 0
+      ? null
+      : Math.round((t.census.usTotal / t.census.gathers) * 100) / 100,
+    ctlMoveMs: round2(mean(castCensus.moveMs)),
 
     perFrame: {
       gathers: per(t.census.gathers),
@@ -240,9 +280,30 @@ function readMoveProfile() {
         + castCensus.pushTerrain + castCensus.pushWmo + castCensus.pushDoodads,
       ),
     },
+    /**
+     * **WHERE THE OTHER ~90% GOES.** The A/B settled that the gather is 0.4 ms of a 4.6 ms section,
+     * so this is the split that finds the rest -- means, not medians, over the 100 us clock. A large
+     * `unaccountedUsPerFrame` with no dominant phase is itself a legitimate answer: the mover costs
+     * what it costs, spread thinly.
+     */
+    phases: movePhases === null ? 'not wired' : movePhases.read(castCensus.frames),
     perGather: {
       chunksVisited: Math.round((t.census.visited / gathers) * 10) / 10,
       chunksRejected: Math.round((t.census.rejected / gathers) * 10) / 10,
+    },
+    /**
+     * THE LIQUID PROVIDER, never instrumented until now and the one caller the earlier execution
+     * list missed: `frame.ts`'s `surfaceAt` goes to `LiquidRegistry`, NOT to the terrain provider, so
+     * it is not one of the four gathers already counted. `surfaceAt` walks every registered surface
+     * and `heightOn` pays a 4x4 matrix inversion per visit, which is the same shape as the terrain
+     * defect in a provider nobody had looked at. `visitedPerCall` is exact and needs no clock.
+     */
+    liquid: {
+      registered: collisionWorld.liquid.census.registered,
+      callsPerFrame: per(collisionWorld.liquid.census.calls),
+      visitedPerCall: collisionWorld.liquid.census.calls === 0
+        ? 0
+        : Math.round((collisionWorld.liquid.census.visited / collisionWorld.liquid.census.calls) * 10) / 10,
     },
   };
 }
@@ -254,7 +315,10 @@ function resetMoveProfile(): void {
   t.census.gathers = 0;
   t.census.visited = 0;
   t.census.rejected = 0;
-  t.census.us.length = 0;
+  t.census.usTotal = 0;
+  collisionWorld.liquid.census.calls = 0;
+  collisionWorld.liquid.census.visited = 0;
+  movePhases?.reset();
 }
 
 function readCastCensus() {
@@ -411,12 +475,12 @@ export class CollisionWorld {
      *    with 1 chunk registered and 539.6 us with 64** -- about **8.4 us per registered chunk the
      *    query does not touch**.
      *
-     * So a cast's cost is dominated by a term the candidate count does not appear in: `gather` visits
-     * EVERY registered chunk and pays a matrix inversion plus a box transform per chunk before
-     * rejecting it. An at-rest frame runs five gathers (3 casts, the push-out, and
-     * `rescueFromVoid`'s `heightAt`), so at 65 chunks that is ~2.7 ms of pure rejection on the bench
-     * machine -- which is the 3.0 ms `capsule-cast.ts` recorded "away from geometry" and attributed to
-     * nothing in particular.
+     * So a cast's cost is NOT linear in candidates. What it is instead was then measured live and is
+     * **not** the gather either: the owner's A/B put `gatherUs` at ~100 us over 4 gathers a frame,
+     * i.e. **0.4 ms of a 4.6 ms `ctl.move`**, with disabling the chunk rejection making no difference.
+     * An intermediate version of this note blamed the per-chunk matrix inversion and derived ~2.7 ms
+     * from an offline bench; that extrapolation was unsound and is withdrawn. Roughly 90% of the
+     * mover is elsewhere, and `movement/move-phases.ts` is the instrument built to say where.
      *
      * The 3.8 ms abbey-stairs number was real; the ATTRIBUTION was not. Its ~3000 solves and its
      * chunk count moved together, so a per-chunk cost read as a per-candidate one.

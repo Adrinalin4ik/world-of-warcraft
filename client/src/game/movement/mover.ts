@@ -7,6 +7,7 @@ import {
   WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
   STEP_UP_ADVANCE,
 } from './constants';
+import { notePhase } from './move-phases';
 import { MoveTraceFrame, moveTrace } from './move-trace';
 import { PlayerMoveState } from './player-state';
 import { airborneHitResponse, groundedHitResponse, moveAndSlide, SlideIteration } from './slide';
@@ -461,7 +462,10 @@ export function step(
    * recovery both existed only because the body could begin a frame embedded. It cannot now.
    */
   if (depenetrate !== undefined) {
+    // PHASE TIMING -- see `move-phases.ts`. Two clock reads; the gather AND the solve are inside.
+    const tPush = performance.now();
     const freed = depenetrate(center, SKIN_WIDTH, true, _penReport, state.lastCentre);
+    notePhase('depenetrate', (performance.now() - tPush) * 1000);
     if (freed !== null) {
       center = freed;
       state.pos.set(center.x, center.y, center.z - halfH);
@@ -514,7 +518,9 @@ export function step(
   // `CastFn`, and a CastFn is an interface -- every movement unit test supplies its own, and none of
   // them honour it. The rule must live where it can be tested, and the filter must not be the only
   // thing standing between a steep face and "grounded".
+  const tClassify = performance.now();
   const classify = cast(center, _down, groundReach, 0, GROUND_COS);
+  notePhase('classify', (performance.now() - tClassify) * 1000);
   const onWalkable = !!classify && classify.normal.z >= GROUND_COS;
   let groundEntity: object | null = onWalkable && classify ? classify.source : null;
 
@@ -572,7 +578,9 @@ export function step(
 
 
   if (!held && grounded && !jumped) {
+    const tGrounded = performance.now();
     const resolved = groundedStep(cast, center, state.horizVel, dt);
+    notePhase('groundedStep', (performance.now() - tGrounded) * 1000);
     center = resolved.center;
     climb = resolved.climb;
     snap = resolved.snap;
