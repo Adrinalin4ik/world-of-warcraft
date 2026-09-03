@@ -207,6 +207,13 @@ export function depenetrateCapsule(
        * candidate every grounded frame -- 255 triangles at that spot. I had estimated 0.02 ms and said
        * so without measuring; the estimate was wrong by more than an order of magnitude.
        *
+       * **AND THE 3.0 ms BASELINE IS NOT A FLOOR OF THIS FILE -- it is the terrain broadphase.** This
+       * note left it unattributed and it was later read as an irreducible per-cast cost. It is not:
+       * `TerrainProvider.gather` visits every REGISTERED chunk and pays a matrix inversion plus a box
+       * transform per chunk before rejecting it, measured at ~8.4 us per untouched chunk
+       * (`__bench__/gather.test.ts`), and an at-rest frame runs five gathers. See the corrected cost
+       * model on `collision-world.ts`'s pad note.
+       *
        * `support` is how far the capsule reaches along the face normal, so a triangle whose PLANE is
        * further than that cannot possibly overlap the capsule -- and the plane distance is a
        * subtraction and a dot product, where `closestPointToSegment` recomputes a triangle plane and

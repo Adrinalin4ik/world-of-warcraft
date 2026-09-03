@@ -306,11 +306,32 @@ export class CollisionWorld {
      * so padding the swept segment by `radius + halfSegment` on every axis already CONTAINS it -- and
      * over-contains it horizontally by `halfSegment`. The extra half yard was pure margin.
      *
-     * It is worth removing because the candidate count is the whole cost of a cast. On the owner's
-     * abbey stairs a cast gathered 249 to 336 WMO triangles, a movement frame issues about ten casts
-     * (the ground classify, up to five in the step-up, up to four in the slide, the snap), and that is
-     * some three thousand capsule-triangle solves a frame -- which is `ctl.move` at 3.8 ms almost
-     * exactly. Box volume falls as the cube of the pad: `(1.01 / 1.51)^3` is 0.30.
+     * It is worth removing because it cuts the candidate count, and the box volume falls as the cube
+     * of the pad: `(1.01 / 1.51)^3` is 0.30. That much stands.
+     *
+     * **BUT THE COST MODEL THIS NOTE USED TO ASSERT WAS WRONG, and the correction matters more than
+     * the pad.** It said "the candidate count is the whole cost of a cast", and reasoned: on the
+     * abbey stairs a cast gathered 249-336 WMO triangles, a frame issues about ten casts, so ~3000
+     * capsule-triangle solves a frame "which is `ctl.move` at 3.8 ms almost exactly". That is ~1.3 us
+     * per solve, and it is REFUTED by measurement:
+     *
+     *  - the owner's `window.castCensus()` on open ground: **69 candidates per frame** over 3 casts
+     *    and 1 push-out -- and `ctl.move` still **4.7 ms**. Forty times fewer candidates for the same
+     *    cost, so the two cannot both be linear in candidates.
+     *  - `__bench__/gather.test.ts` prices the part that is not: `TerrainProvider.gather` against a
+     *    box overlapping ONE chunk, returning an identical 4 candidates either way, costs **10.6 us
+     *    with 1 chunk registered and 539.6 us with 64** -- about **8.4 us per registered chunk the
+     *    query does not touch**.
+     *
+     * So a cast's cost is dominated by a term the candidate count does not appear in: `gather` visits
+     * EVERY registered chunk and pays a matrix inversion plus a box transform per chunk before
+     * rejecting it. An at-rest frame runs five gathers (3 casts, the push-out, and
+     * `rescueFromVoid`'s `heightAt`), so at 65 chunks that is ~2.7 ms of pure rejection on the bench
+     * machine -- which is the 3.0 ms `capsule-cast.ts` recorded "away from geometry" and attributed to
+     * nothing in particular.
+     *
+     * The 3.8 ms abbey-stairs number was real; the ATTRIBUTION was not. Its ~3000 solves and its
+     * chunk count moved together, so a per-chunk cost read as a per-candidate one.
      *
      * STRICTLY CONSERVATIVE, which is the only reason it is safe: the box still contains every point
      * the capsule can occupy on this sweep, so no triangle that could be hit is dropped. Nothing about
