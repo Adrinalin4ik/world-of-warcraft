@@ -240,3 +240,59 @@ describe('kit mesh visibility', () => {
     expect((unposable.liveModels()[0] as any).visible).toBe(false);
   });
 });
+
+/**
+ * THE ASYNC-ARM / SYNC-REAP RACE -- the buff-glow leak.
+ *
+ * `spawn` pushes into `live` only inside `M2Blueprint.load(...).then`, and `reap` walks `live`
+ * synchronously. For an INSTANT spell `SMSG_SPELL_START` and `SMSG_SPELL_GO` land back to back, so
+ * the reap walked an EMPTY list and the instance was pushed afterwards with no reap edge left.
+ *
+ * Both arms below exercise the window directly: `play` is called and `reap` follows on the SAME tick,
+ * before any `await` lets the mocked load's `.then` run. That is the real ordering, not a simulation
+ * of it.
+ */
+describe('reap during an in-flight arm', () => {
+  it('cancels the arm, registers nothing, and reports the count it removed', async () => {
+    const fx = new SpellKitEffects(new THREE.Scene());
+    mockNextModel = () => stubModel('glow', { 0: 400 });
+    mockEmitters = [{
+      slot: 3, tag: 0x15, effectId: 1, modelPath: 'Spells\Glow.mdx',
+    }];
+
+    fx.play(stubUnit('0x1'), 687, 217, true, manager);
+    // SAME TICK -- the load's `.then` has not run, so `live` is still empty. This is the GO arriving
+    // immediately after START, and the return value is what proves the arm was seen at all.
+    expect(fx.liveCount).toBe(0);
+    expect(fx.reap('0x1', 687)).toBe(1);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The model must never reach the scene, a bone, or either manager: registering and then dropping
+    // the instance would leak the REGISTRATION instead of the instance.
+    expect(fx.liveCount).toBe(0);
+    expect(manager.register).not.toHaveBeenCalled();
+    expect(mockUnloaded).toContain('glow');
+    expect(fx.stats.reapedInFlight).toBe(1);
+  });
+
+  /** The property a bare pending SET could not have: a reap cannot cancel an arm that came after it. */
+  it('does not cancel a re-arm that started after the reap', async () => {
+    const fx = new SpellKitEffects(new THREE.Scene());
+    mockNextModel = () => stubModel('glow', { 0: 400 });
+    mockEmitters = [{
+      slot: 3, tag: 0x15, effectId: 1, modelPath: 'Spells\Glow.mdx',
+    }];
+
+    fx.play(stubUnit('0x1'), 687, 217, true, manager);
+    expect(fx.reap('0x1', 687)).toBe(1);
+    // The re-arm holds a token no earlier reap can have seen, so it must survive.
+    fx.play(stubUnit('0x1'), 687, 217, true, manager);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fx.liveCount).toBe(1);
+  });
+});

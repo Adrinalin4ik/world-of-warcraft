@@ -323,6 +323,45 @@ export class SpellKitEffects {
   private live: Instance[] = [];
 
   /**
+   * ARMS STILL WAITING ON A MODEL FETCH, keyed `guid:spellId`, one TOKEN per arm.
+   *
+   * ## The race this closes
+   *
+   * `spawn` is asynchronous: it calls `M2Blueprint.load(...)` and pushes into `live` only inside the
+   * `.then`. `reap` walks `live` SYNCHRONOUSLY. For an INSTANT spell the two edges land back to
+   * back -- `SMSG_SPELL_START` arms and the fetch begins with `live` empty, `SMSG_SPELL_GO` arrives
+   * and reap walks an empty list, and then the fetch resolves and pushes a `persistent: true`,
+   * `remaining: null` instance whose only reap edge is already in the past. A model fetch is tens to
+   * hundreds of milliseconds against a START-to-GO gap of roughly zero.
+   *
+   * Every detail of the owner's report falls out of that: two rows (both hand slots of precast kit
+   * 99, both pushed late), `remaining: null`, only BUFFS (a timed cast has ~1.5 s for the fetch to
+   * land before its GO, so its precast reap works), and the second press clearing them -- by then
+   * `live` is populated and the refusal's `releaseCastPose` finds them. Nothing about the data, the
+   * key, the slot count or the reap's loop was wrong; the list was empty when it was walked.
+   *
+   * ## Why a per-arm TOKEN rather than either shape that was proposed
+   *
+   * A bare pending SET keyed `(guid, spellId)` needs epoch bookkeeping: reap marks the key, then a
+   * legitimate re-arm starts, and its `.then` would see the stale mark and cancel itself. A token
+   * makes that impossible BY CONSTRUCTION -- a reap drains the tokens that exist when it runs, and an
+   * arm that starts afterwards holds a token no earlier reap can ever have seen. The token's identity
+   * IS the epoch, with no counter to keep correct.
+   *
+   * A synchronous PLACEHOLDER in `live` was the other proposal, and it is the more invasive one:
+   * `live` is read at nine sites that dereference `instance.model` -- the billboard pass, the pose
+   * pass, the lifecycle advance, `liveModels`, `liveTransforms`, `remove`, `dropUnit`, `dispose` --
+   * and a placeholder means a null-model guard at every one. A MISSED guard there is a crash or a
+   * silently skipped instance, which is a worse failure mode than the leak being fixed. This keeps
+   * `live` meaning exactly what it has always meant: a real, drawable instance.
+   */
+  private pendingArms = new Map<string, Set<{ cancelled: boolean; persistent: boolean }>>();
+
+  private static armKey(guid: string, spellId: number): string {
+    return `${guid}:${spellId}`;
+  }
+
+  /**
    * THE INSTRUMENT. A spawn fails asynchronously and off the render path, so an absence is otherwise
    * the only symptom -- the reason `level-up-effect.ts` keeps its own `lastError`, and the reason a
    * silent catch there once cost a probe run.
@@ -364,6 +403,26 @@ export class SpellKitEffects {
      * empty, or the tail was refused as implausible. That is the one reading no static analysis can
      * substitute for.
      */
+    /**
+     * Arms cancelled by a `reap` that landed while their model was still being fetched -- the
+     * async-arm / sync-reap race `pendingArms` closes. A non-zero value here on a BUFF cast is the
+     * bug reproducing and being caught; see `pendingArms` for why it only ever happened to instants.
+     */
+    reapedInFlight: 0,
+    /**
+     * CALLS to `reap`, and how many of them found nothing to reap.
+     *
+     * `reap` returned `void` until this round, which is exactly why nobody could tell "reaped
+     * nothing" from "reap never ran" -- the third recorded defect here where a discarded return hid
+     * the problem, after `applyUnitFields` and `mergeQuestLog`. The return is now a count, and these
+     * two make it observable from the console WITHOUT touching `spells.ts` (the other agent's file):
+     * `reapFoundNothing` rising on a buff cast that armed at START is this bug, directly.
+     *
+     * Both are counted here rather than at the call sites for the same reason -- one door, and it is
+     * the one that knows the answer.
+     */
+    reapCalls: 0,
+    reapFoundNothing: 0,
     impactAsked: 0,
     impactNoVictim: 0,
     impactNoKit: 0,
@@ -541,8 +600,41 @@ export class SpellKitEffects {
     ribbonManager: RibbonManagerLike | null = null,
   ): void {
     const guid = unit.guid;
+    // THE IN-FLIGHT TOKEN -- see `pendingArms`. Registered SYNCHRONOUSLY, before the fetch starts, so
+    // a `reap` landing in the same tick as the arm can see this arm exists at all.
+    const armKey = SpellKitEffects.armKey(guid, spellId);
+    const token = { cancelled: false, persistent };
+    let waiting = this.pendingArms.get(armKey);
+    if (waiting === undefined) {
+      waiting = new Set();
+      this.pendingArms.set(armKey, waiting);
+    }
+    waiting.add(token);
+
     void M2Blueprint.load(emitter.modelPath)
       .then((model: THREE.Object3D & { updateMatrix?: () => void }) => {
+        // Off the pending list first, whatever happens next: a token left behind would be cancelled
+        // by some later reap that has nothing to do with it, and `pendingArms` would grow for ever.
+        const stillWaiting = this.pendingArms.get(armKey);
+        if (stillWaiting !== undefined) {
+          stillWaiting.delete(token);
+          if (stillWaiting.size === 0) {
+            this.pendingArms.delete(armKey);
+          }
+        }
+
+        // REAPED WHILE IN FLIGHT. Checked here, at the top, and that placement is the requirement:
+        // the model must not reach the scene, must not be attached to a bone, and must NOT be handed
+        // to `particleManager.register` or `ribbonManager.register` -- registering and then dropping
+        // the instance would leak the registration instead of the instance, which is a worse leak
+        // than the one this fixes. `unload` is the same refcount decrement the `stillWanted` arm
+        // below uses.
+        if (token.cancelled) {
+          this.stats.reapedInFlight += 1;
+          M2Blueprint.unload(model as never);
+          return;
+        }
+
         // The unit may have died, despawned or been replaced during the fetch -- the same
         // `stillWanted` re-check `attachCharacterItems` states, and for the same reason: without it
         // the previous unit's glow lands on whatever is there now, or on nothing.
@@ -726,7 +818,9 @@ export class SpellKitEffects {
    * Non-persistent instances are untouched -- they own their own clock -- and an already-decaying one
    * is skipped, which is the reference's own guard against a second reap reaching it.
    */
-  reap(guid: string, spellId: number): void {
+  reap(guid: string, spellId: number): number {
+    this.stats.reapCalls += 1;
+    let removed = 0;
     for (const instance of this.live) {
       if (instance.decaying || !instance.persistent) {
         continue;
@@ -737,6 +831,7 @@ export class SpellKitEffects {
       instance.decaying = true;
       instance.lifecycle = 'decaying';
       this.stats.reaped += 1;
+      removed += 1;
       // ARMS the clip as well as reading its span, which is the half that was missing: the reap knew
       // how long a decay lasts and never played it, so a reaped shield held its pose while it waited
       // out a fade it was not performing. `armEffectDecay` does both (`world/effect-pose.ts`), and
@@ -750,6 +845,26 @@ export class SpellKitEffects {
       this.stats.decayed += 1;
       instance.remaining = decay;
     }
+
+    // AND THE ARMS STILL IN FLIGHT, which is the whole of this bug. Only the PERSISTENT ones, which
+    // is the same rule the loop above applies: a non-persistent arm races too, but it lands with a
+    // finite `selfTerminateMs` (1000 ms at worst) and ends itself, so cancelling it would delete an
+    // effect that is behaving correctly rather than fix a leak.
+    const waiting = this.pendingArms.get(SpellKitEffects.armKey(guid, spellId));
+    if (waiting !== undefined) {
+      for (const token of waiting) {
+        if (token.persistent && !token.cancelled) {
+          token.cancelled = true;
+          this.stats.reaped += 1;
+          removed += 1;
+        }
+      }
+    }
+
+    if (removed === 0) {
+      this.stats.reapFoundNothing += 1;
+    }
+    return removed;
   }
 
   /** Everything this unit owns, whatever spell armed it -- death, despawn, worldport. */
@@ -758,6 +873,18 @@ export class SpellKitEffects {
       if (instance.guid === guid) {
         instance.decaying = true;
         instance.remaining = 0;
+      }
+    }
+    // EVERY pending arm for this unit, persistent or not -- unlike `reap`, which is spell-scoped and
+    // deliberately spares a self-terminating arm. A unit that died, despawned or worldported must not
+    // receive a late attach at all: the `stillWanted` re-check inside the `.then` would catch a
+    // replaced model, but not a guid still present with the effect no longer wanted.
+    for (const [key, waiting] of this.pendingArms) {
+      if (!key.startsWith(`${guid}:`)) {
+        continue;
+      }
+      for (const token of waiting) {
+        token.cancelled = true;
       }
     }
   }
