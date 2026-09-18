@@ -22,6 +22,17 @@ export const MOPY_NOCAMCOLLIDE = 0x02;
  * having two audiences: the camera stops at the forge pipes you walk under, and threads the
  * railings you stand on.
  *
+ * **A DIVERGENCE WAS TRIED HERE AND REVERTED, and the record is worth more than the code was.** I made
+ * the camera keep any WALKABLE face regardless of NOCAMCOLLIDE, on the premise that the eye was ending
+ * up under the abbey floor. The owner then measured the eye directly: `eyeToFeet` **+2.98** with the
+ * floor 1.72 below it. The eye was never under the floor. The real cause was
+ * `wmo-flags.ts#visibilityMask` carrying `0x40`, which made the camera resolve as EXTERIOR inside a lit
+ * indoor room -- so the interior flood never seeded and the world looked wrong from above the floor.
+ *
+ * The bit is honoured exactly as the reference honours it
+ * (`benilla-formats/src/models/collision.rs:89-99`), and should stay that way unless a MEASUREMENT of
+ * the eye says otherwise.
+ *
  * Every other MOPY bit is ignored. Treating one of them as a reject would silently delete
  * collision geometry, which reads as a building you can walk through.
  */

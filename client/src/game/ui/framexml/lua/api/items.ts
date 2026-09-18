@@ -165,13 +165,21 @@ export interface ItemTooltipInfo {
 /**
  * Resolve `GameTooltip:SetBagItem(bag, slot)` / `:SetLootItem(slot)` / `:SetHyperlink(link)`.
  *
+ * `'questlink'` is the odd one and is deliberately here rather than in a hook of its own: a
+ * `|Hquest:<id>|h` tooltip is a TITLE plus body lines, which is exactly what `ItemTooltipInfo`
+ * carries, and the union already held two quest kinds for reward items. `quest-bridge.ts` chains onto
+ * this source for it the way the loot and merchant bridges chain for theirs, so one hook still serves
+ * every tooltip and `a` is the quest id. The struct's `name` field is a title in that arm; nothing
+ * about it is item-specific except its history.
+ *
  * A VM-KEYED HOOK rather than a direct import, and for the reason the method tables already follow with
  * `getSpellbook`/`getAction`: `methods/gametooltip.ts` is a method table with no world and no session,
  * and it must not grow one. The container and loot bridges install this; before they do, the
  * `Set<Thing>Item` family answers false exactly as it did when it did not exist.
  */
 export type ItemTooltipSource = (
-  kind: 'bag' | 'loot' | 'link' | 'inventory' | 'merchant' | 'buyback' | 'trainer' | 'quest' | 'questlog',
+  kind: 'bag' | 'loot' | 'link' | 'inventory' | 'merchant' | 'buyback' | 'trainer' | 'quest'
+  | 'questlog' | 'questlink',
   a: number | string,
   b?: number,
 ) => ItemTooltipInfo | null;

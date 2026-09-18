@@ -170,6 +170,111 @@ function pluralIsSingular(plainSoFar: string): boolean {
  * the font's own colour, which is what the base `spec.color` already is, so it simply closes the open
  * span. Spans are emitted non-overlapping and in order -- the raster walks them linearly.
  */
+/**
+ * The RAW range of a complete hyperlink that ENDS at `index`, colour wrapper included -- or null.
+ *
+ * **A HYPERLINK IS ONE CHARACTER TO AN EDITOR, and this is what makes it one.** The owner: deleting a
+ * linked item "вместо того чтобы удалить целиком залинкованный блок, он удаляет посимвольно, показывая
+ * id предмета". Both halves of that are the same fact: the box stores the RAW escaped string and
+ * per-character deletion eats the closing `|h` first, which leaves a malformed escape that
+ * `parseMarkup` can no longer hide -- so the id surfaces. The engine deletes the whole run in one
+ * press and never shows the inside of a link.
+ *
+ * WALKED BACKWARDS FROM THE END because that is the only end an editor is at: an optional `|r`, the
+ * closing `|h`, the body, the opening `|h`, the `|H` payload, and an optional `|cAARRGGBB`. Each piece
+ * is required except the two marked optional, and a missing one answers null rather than guessing a
+ * boundary -- half a link deleted is worse than a character deleted.
+ *
+ * `index` is EXCLUSIVE, the same convention a caret has: `caret` characters precede it.
+ */
+export function linkRunEndingAt(text: string, index: number): { start: number; end: number } | null {
+  let at = Math.max(0, Math.min(index, text.length));
+  const end = at;
+  // An optional trailing `|r`, which every link this client builds carries.
+  if (text.slice(at - 2, at) === '|r') {
+    at -= 2;
+  }
+  // The closing `|h`. Without it this is not the end of a link.
+  if (text.slice(at - 2, at) !== '|h') {
+    return null;
+  }
+  at -= 2;
+  // The body, back to the `|h` that opens it.
+  const bodyStart = text.lastIndexOf('|h', at - 1);
+  if (bodyStart === -1) {
+    return null;
+  }
+  // The `|H` payload.
+  const open = text.lastIndexOf('|H', bodyStart - 1);
+  if (open === -1) {
+    return null;
+  }
+  let start = open;
+  // An optional `|cAARRGGBB` immediately before it -- ten characters, and only if it is really there.
+  if (start >= 10 && text.slice(start - 10, start - 8) === '|c') {
+    start -= 10;
+  }
+  return { start, end };
+}
+
+/**
+ * How many characters of `plain` correspond to the first `rawIndex` characters of `text`.
+ *
+ * **THE CARET LIVES IN THE RAW STRING AND IS DRAWN OVER THE PLAIN ONE, and nothing bridged the two.**
+ * The owner: "курсор улетает после вставки". An inserted item link is ~60 raw characters and about 8
+ * visible ones, so the caret was measured over the escapes and landed far to the right of the text it
+ * belongs to.
+ *
+ * THROUGH `parseMarkup` ITSELF, over a prefix, rather than a second walk of the escape rules. Two
+ * copies of that walk would drift, and this one is exactly consistent with the parse that produced
+ * the glyphs -- including at a truncated escape, where the prefix parses as literal text and the
+ * caret sits after the characters that are actually drawn.
+ *
+ * Called once per caret placement (a blink, twice a second, for one focused box), not per frame.
+ */
+export function plainIndexOf(text: string, rawIndex: number): number {
+  if (text.indexOf('|') === -1) {
+    return Math.max(0, Math.min(rawIndex, text.length));
+  }
+  return parseMarkup(text.slice(0, Math.max(0, Math.min(rawIndex, text.length)))).plain.length;
+}
+
+/**
+ * The RAW index whose prefix contains exactly `plainIndex` drawn characters -- the inverse of
+ * `plainIndexOf`.
+ *
+ * Needed by the edit box's horizontal window: the window is chosen in PLAIN space (that is where the
+ * glyphs and the measurements are) and the region is fed RAW text, so that a link inside the window
+ * keeps its colour escapes instead of arriving as bare `[Name]`.
+ *
+ * BY BISECTION OVER `plainIndexOf`, not by a second walk of the escape rules. Two copies of those
+ * rules would drift, and this project has already paid for that class of duplication more than once.
+ * Eight probes for a 255-character box, and only while the text overflows -- the caller skips this
+ * entirely when everything fits, which is the ordinary case.
+ *
+ * The answer is the SMALLEST raw index with that many plain characters, so a window boundary lands
+ * before an escape run rather than inside it.
+ */
+export function rawIndexOf(text: string, plainIndex: number): number {
+  if (plainIndex <= 0) {
+    return 0;
+  }
+  if (text.indexOf('|') === -1) {
+    return Math.min(plainIndex, text.length);
+  }
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (plainIndexOf(text, mid) < plainIndex) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+
 export function parseMarkup(text: string): Markup {
   // Fast path, and it is the overwhelmingly common one: no escapes at all means the caller gets the
   // identical string back and every downstream measurement is bit-for-bit what it was before this

@@ -7,17 +7,21 @@ import {
   createCameraControl, createPendingClicks, runLookSession, seatCamera,
 } from '../../../game/camera/rig';
 import { headHeight } from '../../../game/camera/pivot';
-import { collisionWorld } from '../../../game/collision/collision-world';
+import { collisionWorld, noteMovementFrame } from '../../../game/collision/collision-world';
+import { beginCollisionFrame } from '../../../game/collision/doodad-provider';
 import { CollisionLayer } from '../../../game/collision/types';
 import {
-  CAPSULE_HEIGHT, CAPSULE_RADIUS, MOUSELOOK_BODY_TURN_RATE, MOUSELOOK_PITCH_CLAMP,
+  CAPSULE_HEIGHT, CAPSULE_RADIUS, GROUND_COS, MOUSELOOK_BODY_TURN_RATE, MOUSELOOK_PITCH_CLAMP,
   RUN_BACK_RATIO, RUN_SPEED,
   SETTLE_STREAM_TIMEOUT, SETTLE_TIMEOUT, STATIONARY_CHASE_RATE, TURN_RATE, TURN_RATE_MOVING,
   capsuleHalfSegment,
+  SETTLE_FLOOR_REACH,
 } from '../../../game/movement/constants';
 import { movementFrame } from '../../../game/movement/frame';
+import { moveTrace } from '../../../game/movement/move-trace';
 import { easeDisplayYaw, strafeBodyOffset } from '../../../game/movement/net-motion';
-import { movementFlagsFor, streamMovement } from '../../../game/movement/outbound';
+import { movementFlagsFor, streamMovement, streamSplineDone } from '../../../game/movement/outbound';
+import { serverRideFrame, serverRideStats } from '../../../game/movement/server-ride';
 import { rescueFromVoid } from '../../../game/movement/void-rescue';
 import Player from '../../../game/classes/player';
 
@@ -63,6 +67,17 @@ interface IProp {
    * every key -- the same fallback `uiCapturedPress` takes.
    */
   uiKeyboardFocus?: () => string | null;
+  /**
+   * A cancel-worthy MOVEMENT EDGE just happened: a directional start (forward / backward / strafe) or a
+   * jump-key press. Fired once per edge, never while a key is merely held.
+   *
+   * The one consumer is the cast self-cancel (`game/classes/cast-cancel.ts`), which is why the
+   * membership of "cancel-worthy" is not this file's to choose: the real client's interrupt mask is
+   * `0x10f0` = {forward, backward, strafe L, strafe R, autorun}, and **TURN and PITCH are outside it**.
+   * That is exactly the split this file already computes below -- `strafe` versus `turning` -- so the
+   * edge is taken from those two and a keyboard turn deliberately raises nothing.
+   */
+  onMoveStart?: () => void;
 }
 
 /** One press, as `captureLog` records it. */
@@ -136,6 +151,15 @@ class Controls extends React.Component<IProp> {
   /** Edge-triggered: the swim breach fires once per PRESS, never on a held key. */
   private jumpPressed = false;
 
+  /**
+   * Whether a DIRECTIONAL key was down last frame -- forward, backward or strafe, never turn.
+   *
+   * The cast self-cancel wants the START of movement, so it needs the 0 -> nonzero transition and not
+   * "is moving": a cast begun while already running must not be cancelled by the same key still being
+   * held. See `onMoveStart` in `IProp` for why turn is excluded.
+   */
+  private wasDirectional = false;
+
   /** Pointer lock already asked for in this look session. See the request site for why. */
   private lockRequested = false;
 
@@ -183,6 +207,207 @@ class Controls extends React.Component<IProp> {
     // `window.uiCaptureLog` -- see `captureLog`. Published from the mount rather than at module scope so
     // it exists only while something is actually reading the mouse.
     (window as never as Record<string, unknown>).uiCaptureLog = captureLog;
+
+    /**
+     * **`window.stuckReport()` -- ONE CALL, NO ARMING, ANSWERED WHILE STUCK.**
+     *
+     * Every instrument in this area so far has had to be armed before the event and read after it,
+     * and that has cost this round four readings: a trap read thirty frames of standing at the
+     * console, a counter that drained on release, a live field overwritten before it could be read,
+     * and a trace switched off in the same line that switched it on. A body that is stuck is stuck
+     * NOW -- so the honest instrument for it is a snapshot, and the owner can call it while it is
+     * happening.
+     *
+     * THE 36 BEARINGS are the measurement this codebase has referred to twice without ever having:
+     * "0 of 36 bearings free" appears in `step-up.ts` as evidence from a past round. `free` at 36
+     * means nothing is holding the body horizontally and the freeze is in the MOVER; a small number
+     * means it is genuinely walled in and the geometry is the story; anything between says which way
+     * out exists, which is the question "I cannot leave" actually asks.
+     *
+     * THE MOVE STATE is the other half and may be the whole answer. `settling` freezes the body and
+     * switches gravity off until streamed collision arrives, `wedged` and `stepDown` both report
+     * "standing" to the caller, and any of the three latched is a freeze with no geometry involved
+     * at all -- which is exactly what "хотя я даже не в нем, но я не могу идти" describes.
+     */
+    /**
+     * **`?sinktrap=1` -- THE ONLY TRAP THAT CAN CATCH A FALL AT WORLD ENTRY.**
+     *
+     * The owner: "я прогружаюсь под лестницей." His settle log releases the hold at z **82**, the
+     * stairs level, and under the staircase is **80.6** -- so the fall happens in the first second,
+     * after a release that was healthy in every respect the log records (a floor within five yards,
+     * the terrain registered). Every trap in this area is armed from the console, and a page reload
+     * clears the console, so there has never been a way to be watching when it happens.
+     *
+     * Armed HERE, at the controls mount, which runs before the world finishes streaming -- so the trap
+     * is already live when the body first touches geometry. It freezes both traces on the first frame
+     * the capsule is a tenth of a yard inside anything, which is the entry and not the aftermath.
+     *
+     * A query flag rather than a default, for the reason everything else here is: the trace costs a
+     * per-frame record, and an instrument that is on when nobody asked is how a profile comes back
+     * inflated -- which has already happened once this round.
+     */
+    if (new URLSearchParams(window.location.search).get('sinktrap') === '1') {
+      // eslint-disable-next-line no-console
+      console.log(`[sinktrap] ${moveTrace.armSink(0.1)}`);
+    }
+
+    (window as never as Record<string, unknown>).stuckReport = () => {
+      const cast = collisionWorld.castFor(CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment());
+      const push = collisionWorld.depenetrateFor(
+        CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(), GROUND_COS,
+      );
+      const move = this.unit.move;
+      const centre = move.pos.clone();
+      centre.z += CAPSULE_HEIGHT * 0.5;
+
+      const name = (source: object): string => {
+        const named = source as { group?: { path?: string; index?: number } };
+        if (typeof named.group?.path === 'string') {
+          return `wmo ${named.group.path}#${named.group.index ?? 0}`;
+        }
+        return source.constructor?.name ?? 'unknown';
+      };
+
+      // Half a yard: further than a frame of walking and shorter than the gaps a body threads, so a
+      // blocked bearing here is a wall rather than something noticed early.
+      const PROBE = 0.5;
+      /**
+       * **THE FULL NORMAL, not just its Z -- because Z alone cannot tell the two diagnoses apart.**
+       *
+       * The first reading came back 36 of 36 blocked, every bearing at distance 0 with `nz: 0.01`.
+       * That looks like one face blocking every direction, which would be a defect in the sweep --
+       * but every VERTICAL face has the same `nz` by construction, so the reading cannot distinguish
+       * one face from twelve. The normal's direction can: identical vectors across opposed bearings
+       * is the sweep refusing a direction it should allow, while vectors that point outward from the
+       * body in every bearing is a capsule genuinely enclosed by a hull.
+       *
+       * The sweep itself is not the suspect it looked like -- its already-touching branch does gate
+       * on the closing speed (`capsule-cast.ts`, `closing > 1e-9`), so a receding direction is
+       * refused. That was read rather than assumed.
+       */
+      const blocked: {
+        deg: number; d: number; n: number[]; src: string; same: boolean;
+      }[] = [];
+      let firstSource: object | null = null;
+      const sources = new Set<object>();
+      let free = 0;
+      for (let i = 0; i < 36; i += 1) {
+        const angle = (i * 10 * Math.PI) / 180;
+        const dir = new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0);
+        const hit = cast(centre, dir, PROBE);
+        /**
+         * **A HIT AT 0.22 YD IS ROOM TO WALK, NOT A WALL -- and counting it as blocked made me
+         * read a POCKET as a cage.**
+         *
+         * Under the abbey stairs the report said 0 of 36 free, and seven of those bearings were hits
+         * at 0.049 to 0.225 yd: a fifth of a yard of clearance, against the terrain, with walkable
+         * normals. Only five bearings were at zero -- the underside of the stone ramp. The body was
+         * in a narrow pocket it could shuffle inside, which is a different defect from the fence,
+         * where all thirty-six really were zero.
+         *
+         * So a bearing is FREE if it has room, blocked only if the contact is immediate. The
+         * threshold is one frame of walking: at 7 yd/s and 60 Hz that is about 0.117, so anything
+         * under a tenth of a yard cannot even be stepped into.
+         */
+        if (hit === null || hit.distance > 0.1) {
+          free += 1;
+        }
+        if (hit !== null) {
+          if (firstSource === null) {
+            firstSource = hit.source;
+          }
+          sources.add(hit.source);
+          blocked.push({
+            deg: i * 10,
+            d: Number(hit.distance.toFixed(3)),
+            n: [hit.normal.x, hit.normal.y, hit.normal.z].map((v) => Number(v.toFixed(3))),
+            src: name(hit.source),
+            same: hit.source === firstSource,
+          });
+        }
+      }
+
+      const up = cast(centre, new THREE.Vector3(0, 0, 1), 1.0);
+      const down = cast(centre, new THREE.Vector3(0, 0, -1), 3.0);
+      const overlap = { source: null as string | null, normalZ: 0, gap: 0 };
+      const freed = push(centre, 0, false, overlap);
+
+      return {
+        feet: [move.pos.x, move.pos.y, move.pos.z].map((v) => Number(v.toFixed(3))),
+        freeBearings: free,
+        // Every bearing with any contact inside the probe, free or not -- the `d` on each row says
+        // which. `freeBearings` is the one to read for "can I leave".
+        contactBearings: blocked.length,
+        blockedAtZero: blocked.filter((b) => b.d <= 0.1).length,
+        // Every SECOND bearing, so twenty degrees of the circle fit in one readable object and
+        // opposed directions (0 and 180) are both present -- which is the pair that matters.
+        blocked: blocked.filter((_, i) => i % 3 === 0),
+        distinctSources: sources.size,
+        up: up === null ? null : { d: Number(up.distance.toFixed(3)), src: name(up.source) },
+        down: down === null ? null : {
+          d: Number(down.distance.toFixed(3)),
+          nz: Number(down.normal.z.toFixed(2)),
+          src: name(down.source),
+        },
+        overlap,
+        pushWould: freed === null ? null : Number(freed.distanceTo(centre).toFixed(4)),
+        /**
+         * **THE EYE, IN NUMBERS -- because ten commits into this thread the screenshots stopped
+         * deciding anything.**
+         *
+         * Four different frames were reported as "то же самое", and they were not the same picture: a
+         * building gone, a room over a void, a room over dirt, a camera pressed into a pillar. I was
+         * reading intent out of pixels and getting it wrong about half the time. Whether the EYE is
+         * below the floor is one subtraction, and it settles in one reading what four rounds of looking
+         * could not.
+         *
+         * `eyeToFeet` negative means the eye is beneath the feet. `downFromEye` is what the WALK
+         * audience finds below the eye -- the audience that now holds the floor -- so a hit at a short
+         * distance with an upward normal means there IS floor under the eye and it is above it.
+         * `upFromEye` finding a DOWNWARD normal is the opposite and is the broken state outright.
+         */
+        eye: (() => {
+          const cam = this.props.camera;
+          if (!cam) return null;
+          const eye = cam.position.clone();
+          const down = cast(eye, new THREE.Vector3(0, 0, -1), 6);
+          const up = cast(eye, new THREE.Vector3(0, 0, 1), 6);
+          return {
+            at: [eye.x, eye.y, eye.z].map((v) => Number(v.toFixed(3))),
+            eyeToFeet: Number((eye.z - move.pos.z).toFixed(3)),
+            boom: Number(this.rig.collisionDistance.toFixed(3)),
+            zoom: Number(this.rig.distance.toFixed(2)),
+            downFromEye: down === null ? null : {
+              d: Number(down.distance.toFixed(3)),
+              nz: Number(down.normal.z.toFixed(3)),
+              src: name(down.source),
+            },
+            upFromEye: up === null ? null : {
+              d: Number(up.distance.toFixed(3)),
+              nz: Number(up.normal.z.toFixed(3)),
+              src: name(up.source),
+            },
+          };
+        })(),
+
+        move: {
+          velZ: Number(move.velZ.toFixed(3)),
+          horizVel: Number(move.horizVel.length().toFixed(3)),
+          airborneSince: move.airborneSince,
+          settling: move.settling,
+          wedged: move.wedged,
+          stepDown: move.stepDown,
+          swimming: move.swimming,
+          // The server-ride hand-off, so a charge can be read without a console. `serverRiding`
+          // true means the spline owns the pose and the mover is parked this frame; a
+          // `rideStopSplineId` still set with nothing riding is an ack owed and not yet paid.
+          serverRiding: move.serverRiding,
+          rideSplineId: move.rideSplineId,
+          rideStopSplineId: move.rideStopSplineId,
+          ride: { ...serverRideStats },
+        },
+      };
+    };
     this.element.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mouseup', this.onMouseUp);
     this.element.addEventListener('mousemove', this.onMouseMove);
@@ -363,6 +588,13 @@ class Controls extends React.Component<IProp> {
     const player = this.unit;
     const now = performance.now() / 1000;
 
+    // **OPEN THE COLLISION FRAME BEFORE ANY CAST IS ISSUED.** Every doodad hull refreshes its world
+    // matrix once per epoch instead of once per cast, which is where ~2.9 ms of `ctl.move` was going
+    // -- `collision/doodad-provider.ts#beginCollisionFrame` carries the measurement. It must be here,
+    // at the top of the frame's own update, and not in the movement census: that is stamped AFTER the
+    // mover has already cast, so an epoch bumped there would refresh nothing in time.
+    beginCollisionFrame();
+
     // 1. Mouse look. Right-drag turns the character, left-drag orbits, both buttons run forward.
     const look = runLookSession(this.rig, this.buttons, this.motion, this.prevButtons, this.pending);
     this.motion.dx = 0;
@@ -470,6 +702,55 @@ class Controls extends React.Component<IProp> {
     }
     advanceZoom(this.rig, delta);
 
+    // 2b. **THE SERVER-RIDE GUARD: a server-authored spline owns the avatar this frame.**
+    //
+    // Charge, a knockback path, a taxi flight, a fear flee -- all of them arrive as an
+    // `SMSG_MONSTER_MOVE` naming our own guid, and while one is running the spline is the sole
+    // authority over `move.pos` and the facing. Input, the capsule mover and the outbound movement
+    // stream all yield; only the camera keeps seating, on the body the spline is moving. That is
+    // the reference's own division of labour and its own guard placement
+    // (`benilla-app/src/player/server_ride.rs` for the mirror, `player.rs:800-886` for the guard).
+    //
+    // WHY HERE, after the look session and the zoom and before the keyboard. Mouse-look and zoom
+    // are camera input and must keep working through a charge -- you can spin the view while being
+    // dragged -- and step 1's right-drag weld writes `faceYaw` from the camera, which
+    // `serverRideFrame` then overwrites from the path tangent, so the spline wins the facing for as
+    // long as it runs. Everything from step 3 down is body input, and body input is what yields.
+    //
+    // The keyboard is not read at all here, which is deliberate twice over: no `onMoveStart` fires,
+    // so being charged does not cancel your own cast the way pressing W does (the interrupt is a
+    // KEYPRESS test -- see step 3's `directional` edge); and the jump latch is DROPPED rather than
+    // queued, because a Space pressed mid-ride is a jump the real client never took and a queued
+    // one would fire on the arrival frame.
+    const ride = serverRideFrame(player.move, player.splineRide, performance.now());
+    if (ride.clearRide) {
+      player.clearSplinePath();
+    }
+    if (ride.verdict === 'engaged') {
+      // Once per ride, and it is the instrument the owner reads: the counter part lives on
+      // `monsterMovementHandler.stats.selfMoves`.
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ride] server spline ${player.move.rideSplineId} drives the avatar`
+        + ` (${player.splineRide ? player.splineRide.points.length : 0} pts,`
+        + ` ${player.splineRide ? player.splineRide.durationMs : 0} ms)`,
+      );
+    }
+    if (ride.ackSplineId !== null) {
+      // The server holds our mover spline-controlled -- and DROPS every movement packet we send --
+      // until this arrives. Sent before the resumed frame streams anything of its own, so the
+      // release is the first thing the server sees.
+      streamSplineDone(player.move, ride.ackSplineId);
+    }
+    if (ride.riding) {
+      // The spline's pose, onto the scene graph. `move.modelYaw` was written by the ride, so this
+      // is the same one-line hand-off the ordinary frame ends with.
+      player.syncViewFromMove();
+      this.jumpPressed = false;
+      this.seatFollowCamera(player, delta);
+      return;
+    }
+
     // 3. Keyboard. A/D TURN in vanilla rather than strafing; Q/E strafe.
     //
     // EXCEPT UNDER MOUSE-LOOK, where A/D become STRAFE and turn nothing -- the mouse owns the heading
@@ -484,6 +765,17 @@ class Controls extends React.Component<IProp> {
       - (this.held('KeyD', 'ArrowRight') ? 1 : 0);
     const strafe = mouselook ? strafeKeys + turnKeys : strafeKeys;
     const turning = mouselook ? 0 : turnKeys;
+
+    // THE CAST SELF-CANCEL'S EDGE. Computed here, at the one place that knows which keys turned and
+    // which translated -- the distinction the real client's `0x10f0` interrupt mask draws and that a
+    // downstream "is the player moving" test could not recover. The jump key is in the mask too
+    // (`Script::Jump 0x513bd0` inlines the same gate) and fires on the PRESS, which is what
+    // `jumpPressed` already is -- it is read here before the frame loop clears it below.
+    const directional = forward !== 0 || strafe !== 0;
+    if ((directional && !this.wasDirectional) || this.jumpPressed) {
+      this.props.onMoveStart?.();
+    }
+    this.wasDirectional = directional;
 
     if (turning !== 0) {
       const rate = TURN_RATE * (this.isTranslating(forward, strafe) ? TURN_RATE_MOVING : 1);
@@ -547,6 +839,14 @@ class Controls extends React.Component<IProp> {
       surfaceAt: (feet: THREE.Vector3) => (
         collisionWorld.surfaceAt(feet.x, feet.y, claim)?.surfaceZ ?? null
       ),
+      /**
+       * The push-out for a body INSIDE geometry. The mover calls it only when a step contacted
+       * something, wanted to move and travelled nothing -- see `mover.ts#step`. Same audience and
+       * same capsule as the cast above, because it is the same body.
+       */
+      depenetrate: collisionWorld.depenetrateFor(
+        CollisionLayer.Walk, CAPSULE_RADIUS, capsuleHalfSegment(), GROUND_COS,
+      ),
     };
 
     // Release the post-teleport settle hold once the destination's collision has actually arrived.
@@ -565,7 +865,12 @@ class Controls extends React.Component<IProp> {
     if (player.move.settling) {
       const feetCentre = player.move.pos.clone();
       feetCentre.z += CAPSULE_HEIGHT * 0.5;
-      const resident = deps.cast(feetCentre, new THREE.Vector3(0, 0, -1), 200) !== null;
+      // NEAR the feet, not anywhere below -- see `SETTLE_FLOOR_REACH`. At 200 yd this asked whether
+      // the world had loaded at all, and answered yes from the terrain under a building whose own
+      // floor had not arrived, which is what dropped the body through it.
+      const resident = deps.cast(
+        feetCentre, new THREE.Vector3(0, 0, -1), SETTLE_FLOOR_REACH,
+      ) !== null;
       const groundStreamed = collisionWorld.terrain
         .heightAt(player.move.pos.x, player.move.pos.y) !== null;
       // How long we have been holding, reconstructed from the deadline. `PlayerMoveState` carries a
@@ -575,19 +880,51 @@ class Controls extends React.Component<IProp> {
       // here.
       const elapsed = now - (player.move.settleDeadline - SETTLE_TIMEOUT);
 
-      if (resident
-        || (groundStreamed && elapsed >= SETTLE_TIMEOUT)
-        || elapsed >= SETTLE_STREAM_TIMEOUT) {
+      const byTerrain = groundStreamed && elapsed >= SETTLE_TIMEOUT;
+      const byCap = elapsed >= SETTLE_STREAM_TIMEOUT;
+      if (resident || byTerrain || byCap) {
         player.move.settling = false;
+
+        /**
+         * **THE RELEASE ANNOUNCES ITSELF, because a post-load fall cannot be trapped by hand.**
+         *
+         * Every other instrument in this area is armed from the console, and a page reload clears
+         * the console while the fall happens in the first second of the world. So the one event that
+         * decides it has to speak for itself: which of the three conditions fired, how long the hold
+         * lasted, whether the terrain was registered, and how far the floor probe reached.
+         *
+         * `resident` releasing at once with `ground: false` is the shape of the defect -- a floor
+         * within five yards but no registered terrain means a WMO floor and nothing under it yet.
+         * `byTerrain` after six seconds means the probe never found a floor and we let go on the
+         * timer, which is a legitimate cliff OR a floor that never arrived. `byCap` at thirty is the
+         * backstop and always worth knowing about.
+         *
+         * Once per teleport or world entry, so it adds nothing to a running session.
+         */
+        // `log` rather than `warn`: React DevTools overrides `warn` to append a component
+        // stack, which buried this one line under forty of `requestAnimationFrame`.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[settle] released by ${resident ? 'floor' : (byTerrain ? 'terrain-timeout' : 'cap')}`
+          + ` after ${elapsed.toFixed(2)}s -- floorWithin${SETTLE_FLOOR_REACH}yd=${resident},`
+          + ` terrainRegistered=${groundStreamed},`
+          + ` at ${player.move.pos.x.toFixed(1)}, ${player.move.pos.y.toFixed(1)}, ${player.move.pos.z.toFixed(1)}`,
+        );
       }
     }
 
     beginSection('ctl.move');
+    // TIMED HERE TOO, and deliberately over exactly the span `ctl.move` covers: `CpuSections` keeps
+    // only a per-frame total with no history, so there is no p50 to read out of it -- and a p50 is
+    // the whole point, since five single samples of this line span 4.1 to 10.2 ms. Two clock reads a
+    // frame buys `window.moveProfile()` a median over the last 512 frames.
+    const moveStartedAt = performance.now();
     movementFrame(player.move, deps, {
       moving, dir, speed, wantJump: this.jumpPressed, jumpPressed: this.jumpPressed,
       // The swim pair travels the same way the run speed does, and for the same reason.
       swimSpeed: speeds.swim, swimBackSpeed: speeds.swimBack,
     }, delta, now);
+    noteMovementFrame(performance.now() - moveStartedAt);
     endSection('ctl.move');
     this.jumpPressed = false;
 
@@ -660,8 +997,24 @@ class Controls extends React.Component<IProp> {
     // (`/game?offline=1`, and every movement test), because no sink is attached then.
     streamMovement(player.move, { forward, strafe, turning }, now);
 
-    // 7. Seat the camera. Its cast uses the CAMERA face set, not the walking one, so it stops at
-    // overhangs the player walks under and threads railings the player stands on.
+    // 7 + 8. Seat the camera and settle the first-person fade.
+    this.seatFollowCamera(player, delta);
+  }
+
+  /**
+   * Seat the follow camera on the avatar and settle the first-person body fade.
+   *
+   * Its cast uses the CAMERA face set, not the walking one, so it stops at overhangs the player
+   * walks under and threads railings the player stands on.
+   *
+   * Factored out because the SERVER-RIDE guard needs exactly this and nothing else: the reference
+   * parks input, physics and the outbound stream behind the guard but still carries the follow
+   * camera onto the moving avatar, and says what skipping it costs -- "the body ran off on its
+   * spline while the orbit stayed at the pose the controller last wrote, which reads as the view
+   * detaching into free flight" (`samples/benilla/crates/benilla-app/src/player.rs:827-886`). Two
+   * copies of this block would be two things to keep in step.
+   */
+  private seatFollowCamera(player: Player, delta: number) {
     const head = player.move.pos.clone();
     head.z += CAPSULE_HEIGHT - CAPSULE_RADIUS;
 
@@ -671,6 +1024,7 @@ class Controls extends React.Component<IProp> {
       head,
       pivotHeight: headHeight(null, 1),
       cast: collisionWorld.castFor(CollisionLayer.Camera, CAM_COLLISION_RADIUS, 0),
+
       dt: delta,
     });
 
@@ -679,7 +1033,7 @@ class Controls extends React.Component<IProp> {
     this.camera.position.copy(seat.position);
     this.camera.quaternion.copy(seat.quaternion);
 
-    // 8. First person: hide the body once the fade reaches zero.
+    // First person: hide the body once the fade reaches zero.
     if (player.model) {
       player.model.visible = this.rig.selfFadeAlpha > 0.01;
     }

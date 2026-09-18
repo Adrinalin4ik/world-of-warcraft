@@ -285,12 +285,43 @@ export class AuraHandler extends EventEmitter {
   forget(guid: string): void {
     if (this.byUnit.delete(guid)) {
       this.version += 1;
+      // **AND IT ANNOUNCES ITSELF, which is what gives the DESPAWN a real edge.**
+      //
+      // A deleted slot map is a change like any other, and `readPacket` emits on exactly that test
+      // (`changed`), so staying silent here was the inconsistency. It mattered because this method
+      // is already wired to the one place that knows an object ceased to exist --
+      // `update-object/handler.ts#handleDestroyObjectPacket` calls it for every
+      // `SMSG_DESTROY_OBJECT` -- while every SUBSCRIBER of this feed heard nothing, so a despawn
+      // was invisible to them.
+      //
+      // `aura-visuals.ts` is the one that needed it: it holds a per-guid record of which spells it
+      // armed a kit instance for, and without a despawn edge that record could only ever go stale.
+      // With it, the ordinary diff runs with an EMPTY slot list, which reaps every armed spell and
+      // drops the record -- no new subscription and no second notion of "gone".
+      //
+      // Safe for the other subscriber, checked rather than assumed: `ui/aura-bridge.ts#onAuras`
+      // fires `UNIT_AURA` only for a token whose guid MATCHES, so a mob nobody is watching costs
+      // one loop over four tokens, and a mob somebody IS watching gets the refresh it should get --
+      // its buffs really are gone.
+      this.emit('auras', guid);
     }
   }
 
   /** How many units are being tracked, for the population half of a cost measurement. */
   get trackedUnits(): number {
     return this.byUnit.size;
+  }
+
+  /**
+   * Every guid this handler holds auras for.
+   *
+   * For the re-sweep in `aura-visuals.ts`: the aura feed is not gated on the object feed, so a unit's
+   * auras can arrive before its create block and before `spellData` has loaded, and neither of those
+   * produces a second `'auras'` emit to re-drive the visual off. Iterating the keys is how that sweep
+   * finds the units it already knows about.
+   */
+  trackedGuids(): string[] {
+    return [...this.byUnit.keys()];
   }
 
   /**

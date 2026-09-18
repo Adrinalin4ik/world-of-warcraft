@@ -118,14 +118,27 @@ class BSPTree {
     face: []
   };
   vertices = [];
-  normals = [];
-  constructor(nodes: BSPTreeNode[], planeIndices: number[], faceIndices: number[], vertices: number[]) {
+  normals: ArrayLike<number> = [];
+  /**
+   * `normals` is per-VERTEX and parallel to `vertices`, indexed by the same face indices -- WMO
+   * `MONR` beside `MOVT`. Without it `getTopAndBottomTriangleFromBsp` cannot tell a floor from a
+   * ceiling, and it defaults every face to ceiling: see the block in
+   * `pipeline/wmo/group/index.js#createBSPTree` for what that cost.
+   */
+  constructor(
+    nodes: BSPTreeNode[],
+    planeIndices: number[],
+    faceIndices: number[],
+    vertices: number[],
+    normals: ArrayLike<number> = [],
+  ) {
     this.nodes = nodes;
     this.indices = {
       plane: planeIndices,
       face: faceIndices
     };
     this.vertices = vertices;
+    this.normals = normals;
   }
 
   query(subject, startingNodeIndex) {
@@ -135,49 +148,84 @@ class BSPTree {
     return leafNodeIds;
   }
   
+  /**
+   * **THE TWO HALVES WERE SWAPPED, AND THAT IS WHY A BUILDING COULD BE WALKED THROUGH.**
+   *
+   * MOBN defines a node as `flags, negChild, posChild, nFaces, faceStart, planeDist`
+   * (`wow-data-parser/wmo/group.js:88-96`), where `negChild` is the subtree on the NEGATIVE side of
+   * the split plane. This function tested the negative side and then descended `posChild`, on every
+   * axis and therefore on every internal node -- so a query returned leaves from the mirror-image
+   * region of the tree.
+   *
+   * MEASURED, and the shape of the wrong answer is what identified it. `window.castTrace` on the
+   * owner walking into Northshire Abbey: every horizontal cast gathered exactly **27** WMO faces --
+   * a small, CONSTANT count while he moved -- and not one produced a hit. Constant means the query
+   * was not tracking the box; 27 non-zero means it was not empty either. Floor faces answered a
+   * horizontal sweep with `closing ~ 0` (a vertical normal cannot block horizontal motion), which is
+   * correct, and the wall faces were never in the set to be tested.
+   *
+   * The plane conventions, both verified rather than assumed:
+   *
+   *  - `checkFrustum` returns false only when all eight corners satisfy `ax+by+cz+d < 0`, so it
+   *    answers "does the box touch the half-space `ax+by+cz+d >= 0`";
+   *  - therefore `[-1, 0, 0, planeDist]` is `x <= planeDist`, the NEGATIVE half, and
+   *    `[1, 0, 0, -planeDist]` is `x >= planeDist`, the positive one.
+   *
+   * The locals are named after the half they test, so a future reader cannot pair them wrongly
+   * without the line reading obviously false.
+   *
+   * THE SECOND SUSPECT IS NOW MEASURED AND ACQUITTED, and the note that stood here said it could not
+   * be. The axis is compared with `flags == 0/1/2` rather than `flags & 0x3`, so an internal node
+   * carrying any extra bit would fall through to the `return` below and silently prune its whole
+   * subtree -- a HOLE in the collision at one fixed place, which is exactly the shape of the owner's
+   * "я проваливаюсь под текстуры... всегда в одном месте".
+   *
+   * So it was worth an hour, and it took one: the abbey group the earlier trace named as the hit
+   * source, `world/wmo/azeroth/buildings/nsabbey/nsabbey_005.wmo`, decoded straight off the asset host
+   * and its MOBN histogrammed. **452 nodes, flags exactly `{0: 79, 1: 66, 2: 94, 4: 213}`, and not one
+   * internal node this comparison drops.** The equality is equivalent to the mask on this data.
+   *
+   * It is left as an equality rather than 'fixed' to a mask, because there is now nothing to fix here
+   * and a change would only move the suspicion somewhere unmeasured. `Flag_NoChild` is `0xFFFF` in the
+   * format, so a mask would ALSO have to answer for that value; if a group is ever found with axis bits
+   * beside other flags, that is the day for it, and this paragraph is the measurement to re-run.
+   */
   queryBox(bbox, nodeIndex, bspLeafIdList) {
     if (nodeIndex === -1) {
-      // console.debug("Node is empty", nodeIndex)
       return;
     }
-    
-    const node = this.nodes[nodeIndex]
+
+    const node = this.nodes[nodeIndex];
 
     if ((node.flags & 0x4)) {
       bspLeafIdList.push(nodeIndex);
-    } else if ((node.flags == 0)) {
-      var leftSide = checkFrustum([[-1, 0, 0, this.nodes[nodeIndex].planeDist]], bbox, 1, null);
-      var rightSide = checkFrustum([[1, 0, 0, -this.nodes[nodeIndex].planeDist]], bbox, 1, null);
+      return;
+    }
 
-      if (leftSide) {
-          this.queryBox(bbox, this.nodes[nodeIndex].posChild, bspLeafIdList)
-      }
-      if (rightSide) {
-          this.queryBox(bbox, this.nodes[nodeIndex].negChild, bspLeafIdList)
-      }
-    } else if ((node.flags == 1)) {
-      var leftSide = checkFrustum([[0, -1, 0, this.nodes[nodeIndex].planeDist]], bbox, 1, null);
-      var rightSide = checkFrustum([[0, 1, 0, -this.nodes[nodeIndex].planeDist]], bbox, 1, null);
+    // The split axis, and the plane pair that brackets it. `planeDist` is the coordinate of the
+    // plane on that axis.
+    let negativePlane;
+    let positivePlane;
+    if (node.flags === 0) {
+      negativePlane = [-1, 0, 0, node.planeDist];
+      positivePlane = [1, 0, 0, -node.planeDist];
+    } else if (node.flags === 1) {
+      negativePlane = [0, -1, 0, node.planeDist];
+      positivePlane = [0, 1, 0, -node.planeDist];
+    } else if (node.flags === 2) {
+      negativePlane = [0, 0, -1, node.planeDist];
+      positivePlane = [0, 0, 1, -node.planeDist];
+    } else {
+      return;
+    }
 
-      if (leftSide) {
-        this.queryBox(bbox, node.posChild, bspLeafIdList)
-      }
-      if (rightSide) {
-        this.queryBox(bbox, node.negChild, bspLeafIdList)
-      }
-    } else if ((node.flags == 2)) {
-      var leftSide = checkFrustum([[0, 0, -1, node.planeDist]], bbox, 1, null);
-      var rightSide = checkFrustum([[0, 0, 1, -node.planeDist]], bbox, 1, null);
-
-      if (leftSide) {
-        this.queryBox(bbox, node.posChild, bspLeafIdList)
-      }
-      if (rightSide) {
-        this.queryBox(bbox, node.negChild, bspLeafIdList)
-      }
+    if (checkFrustum([negativePlane], bbox, 1, null)) {
+      this.queryBox(bbox, node.negChild, bspLeafIdList);
+    }
+    if (checkFrustum([positivePlane], bbox, 1, null)) {
+      this.queryBox(bbox, node.posChild, bspLeafIdList);
     }
   }
-
   checkIfInsidePortals(point, groupFile, parentWmoFile) {
     var moprIndex = groupFile.mogp.moprIndex;
     var numItems = groupFile.mogp.numItems;
@@ -622,13 +670,47 @@ class BSPTree {
       // console.log("here 1", bounding, leafIndices, point)
       return null;
     }
-    const zRange = this.getTopAndBottomTriangleFromBsp(point, leafIndices)
-    // Determine upper and lower Z bounds of leaves
-    // const zRange = this.calculateZRange(point, leafIndices);
-    // debugger;
-    // console.log(zRange)
-    const minZ = zRange[0];
-    const maxZ = zRange[1];
+    /**
+     * **THE FLOOR AND THE CEILING WERE SWAPPED HERE, and that is the root of a week of reports.**
+     *
+     * `getTopAndBottomTriangleFromBsp` returns `[topZ, bottomZ]` -- the ceiling first. This read
+     * `min = zRange[0]` and `max = zRange[1]`, so `z.min` carried the CEILING and `z.max` the floor.
+     *
+     * The owner's probe proves it three ways in one reading, standing with his feet at local z 1.9:
+     *
+     *  - group 0 answered `zMin: -999999, zMax: 999999` -- exactly the INITIAL values of `topZ` and
+     *    `bottomZ`, in that order, which pins which slot is which;
+     *  - group 5 answered `zMin: 21.09` and group 3 `zMin: 14.84`, both far ABOVE his feet. A leaf
+     *    containing a point at 1.9 cannot have a floor at 21;
+     *  - and those are the two groups his room actually is, both rejected by the containment test for
+     *    being "below their floor", while group 0 -- which found nothing at all and kept its sentinels
+     *    -- passed by accident and became the seed.
+     *
+     * Everything downstream followed from that seed: the flood started in the wrong room, reached 3 of
+     * 14 groups, and the floor he was standing on was never among them. The void, the vanishing
+     * building, the room over dirt -- one swapped pair.
+     */
+    const zRange = this.getTopAndBottomTriangleFromBsp(point, leafIndices);
+
+    /**
+     * **AND THE SENTINELS BECOME `null`, which is the other half of the same fix.**
+     *
+     * `getTopAndBottomTriangleFromBsp` reports "nothing found" as `topZ = -999999` and
+     * `bottomZ = 999999`. Unswapping the pair without translating those handed the caller a FLOOR at
+     * 999999, so its containment test rejected every group where no floor was found beneath the point
+     * -- which is most of them. The owner's next frame showed exactly that: the interior gone entirely
+     * and the valley drawn through it, because no interior group could be selected at all.
+     *
+     * `null` is the value the caller is already written for: `location-manager` falls back to a portal
+     * raycast for an unbounded end, and then to the group box. A sentinel masquerading as a coordinate
+     * bypassed both.
+     */
+    const NONE_BELOW = 999999;
+    const NONE_ABOVE = -999999;
+    const floor = zRange[1];
+    const ceiling = zRange[0];
+    const minZ = floor === NONE_BELOW ? null : floor;
+    const maxZ = ceiling === NONE_ABOVE ? null : ceiling;
 
     return {
       z: {
@@ -720,15 +802,23 @@ class BSPTree {
         var normal_avg = bary[0]*normal1[2]+bary[1]*normal2[2]+bary[2]*normal3[2];
         if (normal_avg > 0) {
           //Bottom
+          // NEAREST floor below, not the last one found: `minPositiveDistanceToCamera` was compared
+          // against and never updated, so every qualifying triangle overwrote the previous one and the
+          // LAST in iteration order won. With a stack of floors -- a stair, a gallery -- that is
+          // whichever the BSP happened to list last.
           var distanceToCamera = cameraLocal[2] - z;
-          if ((distanceToCamera > 0) && (distanceToCamera < minPositiveDistanceToCamera))
-              bottomZ = z;
+          if ((distanceToCamera > 0) && (distanceToCamera < minPositiveDistanceToCamera)) {
+            minPositiveDistanceToCamera = distanceToCamera;
+            bottomZ = z;
+          }
         } else {
           //Top
           topZ = Math.max(z, topZ);
         }
       }
     }
+    // `[ceiling, floor]`. The caller unpacks it in that order -- see `queryBoundedPoint`, where
+    // reading it the other way round was the defect.
     return [topZ, bottomZ];
   }
 
@@ -736,7 +826,25 @@ class BSPTree {
     var det = (p2[1] - p3[1]) * (p1[0] - p3[0]) + (p3[0] - p2[0]) * (p1[1] - p3[1]);
 
     if (det > -0.001 && det < 0.001) {
-        return Math.min(p1[0], p2[0], p3[0]);
+      /**
+       * **INDEX 2, NOT 0. This returned the minimum X where a Z was required.**
+       *
+       * A near-zero determinant means the triangle projects to a LINE on the XY plane -- a wall, a
+       * riser, the reveal of a doorway. There is no interpolated height for a point over it, so the
+       * fallback is a coordinate of the triangle itself, and it has to be a height.
+       *
+       * Returning `p[0]` handed the caller an X. Everything downstream then treated it as a Z: the
+       * caller builds `(x, y, z)` from it and asks for barycentric coordinates against the real
+       * triangle, which land far off its plane and come back negative, so the face is discarded. A
+       * vertical face therefore never contributes -- and near a doorway, vertical faces are most of
+       * what there is.
+       *
+       * Found by reproducing this whole query offline on the abbey's own group files: with the
+       * barycentric filter omitted, group 3 reports a floor at 1.881 at three separate points in the
+       * doorway while group 0 reports none at all -- the correct answer. The client, which applies the
+       * filter, seeded group 0. That gap between the two runs is this line.
+       */
+      return Math.min(p1[2], p2[2], p3[2]);
     }
 
     var l1 = ((p2[1] - p3[1]) * (x - p3[0]) + (p3[0] - p2[0]) * (y - p3[1])) / det;

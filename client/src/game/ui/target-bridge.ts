@@ -37,6 +37,7 @@ import { LuaVM } from './framexml/lua/vm';
 import { notImplemented } from './framexml/lua/methods/region';
 import { getCast, setCast } from './framexml/lua/api/casting';
 import { fireEvent } from './framexml/lua/events';
+import { setCastBarTeardown } from '../classes/cast-cancel';
 
 /**
  * Register the selection globals against a live world. Returns the teardown.
@@ -103,15 +104,51 @@ export function attachTargetBridge(vm: LuaVM, world: World): () => void {
    * is what puts `INTERRUPTED` in the bar's text (`castingbarframe.lua:147-153`).
    */
   vm.registerFunction('SpellStopCasting', () => {
+    const spells = world.game.objectHandler.spellHandler;
     const cast = getCast(vm, 'player');
-    if (cast === null) {
+    // THE SNAPSHOT IS NOT THE ONLY WAY TO BE CASTING. It is created by `SMSG_SPELL_START`, so for the
+    // length of the send -> START round trip a cast is genuinely in flight with no bar and no snapshot
+    // -- and Escape pressed there used to answer nil and fall through to closing a window instead. The
+    // in-flight guard covers exactly that window because it is armed on the SEND
+    // (`game/classes/pending-cast.ts`), and the reference reads its own equivalent first for the same
+    // reason (`ui_cast.rs:270`, `inflight(&pending, ...)`).
+    // BOTH SLOTS, because Escape cancels a queued on-next-swing strike as well as an ordinary cast.
+    // The reference keeps that reader separate from the guard and says why (`ui_cast.rs:196-199`,
+    // decision 1049): "In the reference a queued strike simply *is* the inflight spell, so
+    // `Script::SpellStopCasting 0x6e6e80`'s plain `IsCasting` branch cancels it like any cast ...
+    // `Inflight` is where our two slots are re-joined for that reader." The MOVEMENT self-cancel
+    // deliberately does NOT use this -- it reads `currentCast()`, the guard alone, because the
+    // reference's un-queue list ends "never movement".
+    const guarded = spells.inflightOrQueued();
+    if (cast === null && guarded === null) {
       return [null];
     }
-    setCast(vm, 'player', null);
-    fireEvent(vm, 'UNIT_SPELLCAST_INTERRUPTED', ['player', cast.name, 0, cast.castID]);
-    if (!world.session.offline) {
-      world.game.objectHandler.spellHandler.cancelCast(cast.spellId, cast.castID);
+    if (cast !== null) {
+      setCast(vm, 'player', null);
+      fireEvent(vm, 'UNIT_SPELLCAST_INTERRUPTED', ['player', cast.name, 0, cast.castID]);
     }
+    // The snapshot's spell id when there is one -- it is the cast the player can see -- and the guard's
+    // otherwise. `castID` is 0 for every cast this client sends, which is what `castSpell` writes.
+    const spellId = cast !== null ? cast.spellId : (guarded as number);
+    // **AND THE GLOBAL COOLDOWN GOES BACK** -- the owner's "мы сами его отменили как-то", of which
+    // Escape is the "как-то". A locally cancelled cast gets no failure packet from the server, so the
+    // wire-side clears cannot reach this edge either; the movement cancel
+    // (`classes/cast-cancel.ts`) is the sibling route and clears for the same reason. Only `fromGcd`
+    // entries are dropped, so a real cooldown survives -- see `SpellHandler#clearGlobalCooldown`.
+    spells.clearGlobalCooldown();
+    if (!world.session.offline) {
+      spells.cancelCast(spellId, cast !== null ? cast.castID : 0);
+    } else {
+      // No wire offline, but the guard must still open or the next press is refused as a duplicate.
+      spells.releaseCastGuard(spellId);
+    }
+    // Escape bypasses the movement `InterruptFlags` gate -- the reference's `SpellStopCasting ->
+    // AbortCast` has no flags test at all, "the gate belongs to the movement path alone"
+    // (`ui_cast.rs:363-365`). So no gate here, unlike `cast-cancel.ts`.
+    //
+    // The pose has to be handed back for the same reason the movement path does it: it is a LOOP and
+    // nothing else will ever take the latch off it.
+    spells.releaseCastPose(world.player?.guid ?? null, spellId);
     return [1];
   });
 
@@ -140,9 +177,37 @@ export function attachTargetBridge(vm: LuaVM, world: World): () => void {
     vm.registerFunction(name, () => stub(null as never, 0, []));
   }
 
+  /**
+   * THE MOVEMENT CANCEL'S BAR HALF. `game/classes/cast-cancel.ts` does the wire, the guard and the
+   * pose -- none of which needs a VM -- and calls this for the part that does.
+   *
+   * Registered here rather than in the cancel module because this is the file that already owns the
+   * same teardown for Escape (`SpellStopCasting` above); the two now differ only in what triggers
+   * them, which is where the difference belongs.
+   *
+   * **The event is `UNIT_SPELLCAST_INTERRUPTED` and not `_STOP`**, and the reference argues the point
+   * at length (`ui_cast.rs:377-394`): the client's own local event is the SILENT stop, but what the
+   * player actually sees in the real client is the RED "Interrupted" bar, because the server answers
+   * the cancel with a failing result and the client repaints on that echo. Firing the interrupt locally
+   * reproduces the visible sequence at zero round trip. `castingbarframe.lua:147-153` is what writes
+   * the word.
+   *
+   * The snapshot may legitimately be absent -- a cancel inside the send -> `SMSG_SPELL_START` window
+   * has a guard but no bar yet -- and then there is nothing to tear down and no event worth firing.
+   */
+  setCastBarTeardown((spellId) => {
+    const cast = getCast(vm, 'player');
+    if (cast === null || cast.spellId !== spellId) {
+      return;
+    }
+    setCast(vm, 'player', null);
+    fireEvent(vm, 'UNIT_SPELLCAST_INTERRUPTED', ['player', cast.name, 0, cast.castID]);
+  });
+
   (window as unknown as Record<string, unknown>).worldScan = () => lastScan;
 
   return () => {
+    setCastBarTeardown(null);
     delete (window as unknown as Record<string, unknown>).worldScan;
   };
 }

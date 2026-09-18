@@ -72,6 +72,7 @@ import { resolveUnitToken } from '../world/unit-tokens';
 import type Unit from '../classes/unit';
 import { REACTION_FRIENDLY } from '../world/faction';
 import { spellData } from '../pipeline/dbc/spell-data';
+import castWithRefusal from './cast-refusal';
 
 /**
  * `SPELL_EFFECT_DUEL`.
@@ -609,7 +610,7 @@ export function attachGroupBridge(vm: LuaVM, world: World): () => void {
         + 'SMSG_INITIAL_SPELLS has not landed');
       return [];
     }
-    spells.castSpell(duelSpell, targetGuid);
+    castWithRefusal(vm, spells, duelSpell, targetGuid);
     return [];
   });
 

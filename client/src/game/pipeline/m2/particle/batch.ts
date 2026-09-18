@@ -20,6 +20,100 @@ const scratchWorldScale = new THREE.Vector3();
  * varies: world position, scale, rotation, colour and the sub-rect of the flipbook to sample. The
  * vertex shader billboards the quad in view space, so nothing here has to face the camera.
  */
+/**
+ * TWO CONVENTIONS, AND EVERY SPRITE IN THE GAME WAS HALF ITS SIZE BECAUSE THEY WERE NEVER RECONCILED.
+ *
+ * The M2 scale track is a **HALF-size** -- a radius. The reference states it and byte-verifies it in
+ * the client's own quad writer `0x7b2a50`: "The rendered **half-size** is the over-life scale ramp x
+ * a gated twinkle multiplier" (`benilla-formats/src/particles.rs:418-419`, wow-re
+ * `part-simspace-fields.md`).
+ *
+ * `shader.vert` builds the quad as `position.xy * iScale` where "`position` is the unit quad,
+ * spanning -0.5..0.5" -- so `iScale` is the quad's **FULL extent**. Packing the ramp value straight
+ * into it therefore rendered a half-size of `ramp / 2`: a constant factor of exactly 2, on every
+ * particle of every emitter in the game.
+ *
+ * That single factor is the shape of what the owner reported four separate times on four unrelated
+ * chains -- the healing precast leaves ("очень маленькие"), the hand glow, a Shadow Bolt projectile,
+ * and a warlock summon -- plus, by arithmetic, the BEADED trail: Fireball authors 50 births/sec at
+ * 24 u/s, so births land 0.48 units apart, and a sprite whose measured ramp is ~0.2 drew 0.2 wide
+ * against a 0.48 gap (a dotted line by construction) where it should draw 0.4 and very nearly touch.
+ * Four size complaints and the beading were one defect.
+ *
+ * CORRECTED HERE AND NOT IN THE SHADER, deliberately. The shader's contract ("`iScale` is the full
+ * extent of a -0.5..0.5 quad") is self-consistent and is shared with its own UV derivation, which
+ * this project has already broken once by "simplifying" it. The conversion belongs at the boundary
+ * where the file's semantic is read, which is here.
+ *
+ * ## SELF-REVIEW: THE TWINKLE POPULATION QUOTED HERE WAS WRONG BY 6x, AND SO WAS ITS CONCLUSION
+ *
+ * This paragraph used to say "903 (57.2%) author `min != max` ... a live multiplier on the majority
+ * of emitters, not a corner". **Both numbers came from a broken reader.** The hand-offset survey
+ * script assumed `FBlock` was 20 bytes; it is **16** (`part-track.js`: two `Nofs`, 8 + 8), so every
+ * offset past `colorTrack` at 260 was wrong by an accumulating 4 bytes per FBlock -- the "twinkle
+ * min/max" it read were really `baseSpinVariation` and `spinSpeed`. The record size is the canary
+ * that catches it and it was there all along: five FBlocks x 4 bytes is exactly the 20-byte gap
+ * between the wrong total (496) and the declared `PARTICLE_EMITTER_SIZE` (476).
+ *
+ * Re-measured with a reader validated field-for-field against `M2Parser` on Fireball first, across
+ * 1614 emitters: **147 (9.1%) author `min != max`**, 1467 (90.9%) are the degenerate case the
+ * reference skips. So the gated twinkle multiplier is a genuine but MINORITY gap -- a corner, which
+ * is the opposite of what this file claimed. Still worth porting, still a separate commit (a
+ * `{0.7, 1}` range is a shrink and would confound a growth), and now correctly sized.
+ *
+ * Two more numbers from the same corrected survey, because they bear on this constant directly:
+ * **spin is authored non-zero on 822 of 1614 emitters (50.9%)** -- `baseSpin` and `spinSpeed` are
+ * both read, so that channel is faithful -- and **only 59 of 1614 (3.7%) author a NON-SQUARE
+ * `scaleTrack`**, which makes an elongated sprite a rare authored shape rather than a normal one.
+ *
+ * ## AND THE PROVENANCE OF THE 2x IS WEAKER THAN THIS FILE FIRST CLAIMED
+ *
+ * The reference's statement is about a SCALAR. `OverLife.scale` is `[f32; 3]` -- three keys of ONE
+ * float -- and `OverLife::sample` computes a single `size` from it (`particles.rs:167, 223`). v264
+ * authors a PAIR (`scaleTrack: FBlock(float32array2)`), which is a 3.3.5a widening benilla cannot
+ * speak to, so "byte-verified in the client's own quad writer" is true of the reference's build and
+ * OVERSTATED for this one. The half-size semantic almost certainly carried over into both
+ * components, and the corpus is consistent with it -- authored magnitudes run p50 0.417, p90 4.167,
+ * p99 12.5, max 13.889, so large sprites are normal and doubling them is not obviously absurd -- but
+ * this is a reading, not a verification.
+ *
+ * What IS settled, and it was the open question: the reference applies the half-size rule
+ * **UNCONDITIONALLY**. `size` is computed for every emitter in `OverLife::sample` with no flag gate;
+ * the only modulation is the twinkle multiplier above. So there is no per-blend, per-sheet or
+ * per-flag exemption to discover -- if the 2x is wrong it is wrong everywhere, not here.
+ */
+/**
+ * EVERY PARTICLE HERE IS A CAMERA-FACING HEAD QUAD, AND THE DATA SAYS THAT IS CORRECT.
+ *
+ * M2 authors a geometry selector -- `particleType` (+44) and `headOrTail` (+45) -- and the reference
+ * specifies the alternative precisely: "a tail-mode particle (`head_tail` 1/2) renders a
+ * velocity-projected streak of world length `|velocity| * tail_time`, trailing behind the motion"
+ * (`benilla-formats/src/particles.rs:393-397`, wow-re `part-quad-tail-twinkle.md`). A stretched,
+ * zero-spin, screen-aligned sprite is exactly what such a particle looks like drawn as a head, so
+ * this was the standing explanation for the fireball's elongated glow.
+ *
+ * **IT IS NOT THE EXPLANATION. Measured across 1614 emitters in the served build, `particleType` and
+ * `headOrTail` are CONSTANT 0 -- every emitter, no exceptions.** Not one asks for tail mode.
+ *
+ * THE OFFSETS ARE NOT IN DOUBT, which matters because the last survey in this subsystem was ruined
+ * by a 4-byte-per-FBlock stride error. Both bytes were read through `M2Parser` for Fireball first,
+ * and a byte histogram of the whole region +36..+56 confirms the alignment independently -- every
+ * neighbouring field takes exactly the values its semantic predicts: `blendingType` (+40) 4/2/1,
+ * `emitterType` (+41) 1/2/3 = plane/sphere/spline, `rows` and `columns` (+48/+50) 1/2/4/8, the high
+ * bytes of both constant 0, `priorityPlane` (+46/+47) signed with 255 high bytes. The record-size
+ * canary agrees: the field list sums to `PARTICLE_EMITTER_SIZE` 476 only with these two bytes here.
+ *
+ * `tailLength` (+348) IS authored variously -- 50 distinct values, median 0.100, up to 10.0 -- on
+ * emitters whose selector is 0, so it is vestigial authoring rather than evidence of tail mode.
+ * That was the one thing that could have resurrected the hypothesis and it does not.
+ *
+ * So the head/tail selector is a decode-and-ignore, and it is INERT: implementing tail geometry
+ * would change nothing in this corpus. Named here so nobody ports a whole velocity-oriented quad
+ * lane for zero emitters -- and so that if a later build's data does select it, the mechanism is
+ * already written down with its citation.
+ */
+const HALF_SIZE_TO_EXTENT = 2;
+
 export class ParticleBatch extends THREE.Mesh {
 
   readonly capacity: number;
@@ -101,8 +195,17 @@ export class ParticleBatch extends THREE.Mesh {
      * `CLAUDE.md` records three rounds of.
      */
     sizeScale = 1,
+    /**
+     * BAKED-AT-BIRTH: the emitter's orientation was applied to each particle when it was born, so
+     * `worldMatrix` must contribute only its TRANSLATION here. True for every emitter whose file
+     * flags leave `MODEL_SPACE` (0x10) clear, which is all of them measured so far. See
+     * `integrate.ts#MODEL_SPACE`.
+     */
+    baked = false,
   ): number {
     const cellCount = this.rows * this.columns;
+    // Hoisted: `pack` runs per particle and this is one array read per CALL rather than per particle.
+    const we = worldMatrix.elements;
     const cellWidth = 1 / this.columns;
     const cellHeight = 1 / this.rows;
 
@@ -134,19 +237,32 @@ export class ParticleBatch extends THREE.Mesh {
       const lifespan = pool.lifespan[slot];
       const t = lifespan > 0 ? Math.min(1, pool.age[slot] / lifespan) : 1;
 
+      // BAKED-AT-BIRTH clouds add only the TRANSLATION; re-oriented ones take the whole matrix.
+      // `integrate.ts#MODEL_SPACE` carries the citation and the byte-identical-for-a-static-emitter
+      // argument. The branch is hoisted out of the loop as `we`/`baked` above, so this costs one
+      // already-loaded boolean per particle.
       scratchPosition.set(
         pool.position[slot * 3],
         pool.position[slot * 3 + 1],
         pool.position[slot * 3 + 2],
-      ).applyMatrix4(worldMatrix);
+      );
+      if (baked) {
+        scratchPosition.x += we[12];
+        scratchPosition.y += we[13];
+        scratchPosition.z += we[14];
+      } else {
+        scratchPosition.applyMatrix4(worldMatrix);
+      }
 
       this.offsets[index * 3] = scratchPosition.x;
       this.offsets[index * 3 + 1] = scratchPosition.y;
       this.offsets[index * 3 + 2] = scratchPosition.z;
 
       evaluateFBlockVec2(definition.scaleTrack, t, scratchScale);
-      this.scales[index * 2] = scratchScale.x * worldScaleFactor * sizeScale;
-      this.scales[index * 2 + 1] = scratchScale.y * worldScaleFactor * sizeScale;
+      // THE HALF-SIZE -> FULL-EXTENT CONVERSION. See `HALF_SIZE_TO_EXTENT`: this is the one place the
+      // M2's "radius" convention meets this renderer's "full width" one, and it was missing.
+      this.scales[index * 2] = scratchScale.x * HALF_SIZE_TO_EXTENT * worldScaleFactor * sizeScale;
+      this.scales[index * 2 + 1] = scratchScale.y * HALF_SIZE_TO_EXTENT * worldScaleFactor * sizeScale;
 
       this.rotations[index] = pool.spin[slot];
 

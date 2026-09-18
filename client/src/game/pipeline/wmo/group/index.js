@@ -142,9 +142,30 @@ class WMOGroup {
   }
 
   createBSPTree(nodes, planeIndices, attributes) {
-    const { indices, positions } = attributes;
+    /**
+     * **THE NORMALS WERE NEVER PASSED, AND THAT IS THE ROOT OF THE WHOLE VISIBILITY THREAD.**
+     *
+     * `BSPTree` declares `normals = []` and nothing ever filled it, so
+     * `getTopAndBottomTriangleFromBsp` read `undefined` for every component, built a `NaN` vector,
+     * and evaluated `normal_avg > 0` -- which is FALSE for `NaN`. Every triangle was therefore
+     * classified as a CEILING, and a floor could not be found at any point in any group, ever.
+     *
+     * The owner's probe shows it as a clean asymmetry, from both his feet and his eye: `zMax` comes
+     * back as 13.34, 18.1, 20.49 -- real ceilings -- and `zMin` is `null` every single time.
+     *
+     * Downstream, that is everything. `location-manager` requires a floor to accept a group as a
+     * candidate, so no group was ever accepted on its merits; the camera's room was whichever
+     * candidate passed by accident; the portal flood seeded in the wrong room; and the group holding
+     * the floor he was standing on was never reached. The void, the vanishing building, the room
+     * over dirt, the "camera under the floor" -- all of it.
+     *
+     * `MONR` was parsed and available on `attributes` the whole time (`loader/definition.js:95-96`),
+     * parallel to `positions` and indexed by the same vertex indices the BSP faces use. The data was
+     * there; only the argument was missing.
+     */
+    const { indices, positions, normals } = attributes;
 
-    this.bspTree = new BSPTree(nodes, planeIndices, indices, positions);
+    this.bspTree = new BSPTree(nodes, planeIndices, indices, positions, normals);
 
     // MOPY flags, one byte per triangle, indexed by the SAME triangle index MOBR's entries carry.
     // That shared indexing is what lets the walk face set (minus DETAIL) and the camera face set

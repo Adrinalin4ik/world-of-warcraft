@@ -13,6 +13,7 @@ import TerrainManager from './terrain-manager';
 import VisibilityManager from './visibility-manager';
 import WMOManager from './wmo-manager';
 import { ParticleManager } from '../pipeline/m2/particle/manager';
+import { RibbonManager } from '../pipeline/m2/ribbon/manager';
 
 class WorldMap extends THREE.Group {
 
@@ -45,6 +46,147 @@ class WorldMap extends THREE.Group {
     this.doodadManager = new DoodadManager(this, this.constructor.ZEROPOINT);
     this.wmoManager = new WMOManager(this, this.constructor.ZEROPOINT);
     this.visibilityManager = new VisibilityManager(this);
+
+    /**
+     * **`window.wmoReport()` -- every loaded WMO group, its flags, and whether it was drawn.**
+     *
+     * The owner's floor is present in COLLISION and absent from the render: his own probe found
+     * `NSABBEY_005.WMO#5` with an upward normal directly under the eye, and the area was a VOID until a
+     * terrain guard filled it. So the question is no longer "which subsystem" -- it is "why is one
+     * GROUP not drawn", and that needs the groups named by index rather than counted.
+     *
+     * `visibleFrame` against the manager's current `frame` is the whole answer: equal means the flood
+     * reached it this frame, behind means it did not. `EXTERIOR`/`EXTERIOR_LIT` are printed raw because
+     * the mask over them is what this thread already turned on once.
+     */
+    if (typeof window !== 'undefined') {
+      /**
+       * **`window.groupProbe(x, y, z)` -- which groups claim a world point, and what the containment
+       * test says about each.**
+       *
+       * The portal trace cleared the projection: world vertices are sane, and the collapsed rects are
+       * genuinely off screen, so the flood is behaving correctly for the seed it was given. What it also
+       * showed is that every portal in the seed group's list is 30 to 45 yd away from where the owner
+       * stands. The seed is not his room, and no amount of sorting candidates fixes that -- a group only
+       * BECOMES a candidate if `queryBoundedPoint` yields a floor for it.
+       *
+       * So this asks the question one layer earlier: for every group whose bounding box contains the
+       * point, does the BSP place the point inside, and what Z range comes back. A group whose box
+       * contains the feet but whose query returns null can never be selected, however the selection is
+       * written -- and that is the gap this is built to expose or to rule out.
+       *
+       * Takes WORLD coordinates and converts per WMO, because that conversion is itself a candidate:
+       * `local` is printed so it can be checked against the group box that is being tested.
+       */
+      window.groupProbe = (x, y, z) => {
+        const world = new THREE.Vector3(x, y, z);
+        const rows = [];
+        for (const wmo of this.wmoManager.entries.values()) {
+          if (!wmo.views.root) continue;
+          const local = wmo.views.root.worldToLocal(world.clone());
+          if (!wmo.root.boundingBox.containsPoint(local)) continue;
+          for (const group of wmo.groups.values()) {
+            if (!group.boundingBox.containsPoint(local)) continue;
+            let query = null;
+            let threw = null;
+            try {
+              query = group.bspTree.queryBoundedPoint(local, group.boundingBox);
+            } catch (e) {
+              threw = String(e && e.message);
+            }
+            const flags = group.header.flags;
+            rows.push({
+              index: group.index,
+              flags: `0x${flags.toString(16)}`,
+              exterior: (flags & 0x8) !== 0,
+              local: [local.x, local.y, local.z].map((v) => Number(v.toFixed(2))),
+              boxZ: [group.boundingBox.min.z, group.boundingBox.max.z].map((v) => Number(v.toFixed(2))),
+              queryNull: query === null,
+              zMin: query && query.z.min === null ? null : (query ? Number(query.z.min.toFixed(2)) : null),
+              zMax: query && query.z.max === null ? null : (query ? Number(query.z.max.toFixed(2)) : null),
+              portalRefs: group.portalRefs ? group.portalRefs.length : null,
+              threw,
+            });
+          }
+        }
+        return rows;
+      };
+
+      window.wmoReport = () => {
+        const out = [];
+        for (const wmo of this.wmoManager.entries.values()) {
+          for (const group of wmo.groups.values()) {
+            const view = wmo.views.groups.get(group.index);
+            const flags = group.header.flags;
+            out.push({
+              path: (wmo.path || '').split(/[\/]/).pop(),
+              index: group.index,
+              flags: `0x${flags.toString(16)}`,
+              exterior: (flags & 0x8) !== 0,
+              exteriorLit: (flags & 0x40) !== 0,
+              hasView: !!view,
+              visibleFrame: view ? view.visibleFrame : null,
+              drawn: view ? view.visible : null,
+              meshes: view ? view.children.filter((c) => c.isMesh).length : null,
+            });
+          }
+        }
+        return { frame: this.visibilityManager.frame, groups: out };
+      };
+
+      /**
+       * **`window.voidReport()` -- the exact inputs the offline rig needs to reproduce one frame.**
+       *
+       * The owner's standing report is a frame taken OUTSIDE on the abbey steps in which the facade and
+       * the room through the door are both drawn and the terrain, the trees and the distant buildings
+       * are all gone. `VisibilityManager#update` clears `map.exterior.visible` every frame and only
+       * `enablePortalsFromExterior` puts it back, so that picture says the flood never reached the
+       * outdoors -- the verdict was INTERIOR while he stood outside.
+       *
+       * `client/harness/` reproduces a frame from real WMO bytes in 210 ms with no browser, but it
+       * could not reproduce THAT frame: sweeping 90 positions standing on the abbey's exterior shell
+       * left the outdoors lit at every one. So the cause is not in the abbey's own geometry; it is in
+       * an input the rig does not have -- the real placement, the neighbouring buildings, or the body
+       * point actually passed in.
+       *
+       * Rather than guess a third time (twice already reverted: widening the deferred exterior arm drew
+       * the street through walls), this prints what the rig consumes:
+       *
+       *  - `bodyLocal` and `wmo` place the point in the rig directly;
+       *  - `loc`/`group` say whether the verdict really is interior;
+       *  - `chunks` separates "terrain not ENABLED" from "terrain not LOADED", which the picture
+       *    cannot distinguish and which are unrelated defects.
+       *
+       * Ordinary console line, no arguments -- a report the owner can paste back.
+       */
+      window.voidReport = () => {
+        const camera = this.visibilityManager.lastCamera || null;
+        const nearby = [];
+        for (const wmo of this.wmoManager.entries.values()) {
+          if (!wmo.views.root || !camera) continue;
+          const local = wmo.views.root.worldToLocal(camera.position.clone());
+          if (Math.abs(local.x) > 150 || Math.abs(local.y) > 150) continue;
+          nearby.push({
+            path: (wmo.path || '').split(/[\/]/).pop(),
+            eyeLocal: [local.x, local.y, local.z].map((v) => Number(v.toFixed(2))),
+          });
+        }
+        const body = this.visibilityManager.lastBodyPoint || null;
+        return {
+          loc: camera && camera.location ? camera.location.type : null,
+          group: camera && camera.location && camera.location.wmo
+            ? camera.location.wmo.group.index : null,
+          eyeWorld: camera
+            ? [camera.position.x, camera.position.y, camera.position.z]
+              .map((v) => Number(v.toFixed(2))) : null,
+          bodyWorld: body ? [body.x, body.y, body.z].map((v) => Number(v.toFixed(2))) : null,
+          exteriorVisible: this.exterior ? this.exterior.visible : null,
+          chunksLoaded: this.chunks.size,
+          chunksDrawn: [...this.chunks.values()].filter((c) => c.visible).length,
+          nearby,
+        };
+      };
+    }
     this.locationManager = new LocationManager(this);
 
     // Materials that want per-frame light uniforms. Populated at content-load time by the managers
@@ -57,6 +199,11 @@ class WorldMap extends THREE.Group {
     this.add(this.particleGroup);
 
     this.particleManager = new ParticleManager(this.particleGroup);
+    // RIBBON TRAILS share the particle group, for the reason that group exists: it lives apart so
+    // doodad visibility culling cannot take it, and a trail is exactly as un-cullable-by-doodad as a
+    // particle. Verified rather than assumed -- `visibility-manager.js` writes `.visible` on chunks,
+    // doodads and WMO views and never on this group.
+    this.ribbonManager = new RibbonManager(this.particleGroup);
 
     this.data = data;
     this.wdt = wdt;
@@ -234,6 +381,7 @@ class WorldMap extends THREE.Group {
     this.doodadManager.animate(delta, camera, cameraMoved);
     this.wmoManager.animate(delta, camera, cameraMoved);
     this.particleManager.animate(delta, camera);
+    this.ribbonManager.animate(delta, camera);
   }
 
   // `delta` is the real per-frame seconds elapsed (THREE.Clock.getDelta(), from
@@ -340,12 +488,16 @@ class WorldMap extends THREE.Group {
     }
   }
 
-  locateCamera(camera) {
-    this.locationManager.update([camera]);
+  locateCamera(camera, bodyPoint = null) {
+    this.locationManager.update([camera], bodyPoint);
   }
 
-  updateVisibility(camera) {
-    this.visibilityManager.update([camera]);
+  /**
+   * `bodyPoint` is the PLAYER's own position, used as a fallback seed when the eye resolves to no
+   * interior group -- see `location-manager.js#locateCamera` for the measurement behind it.
+   */
+  updateVisibility(camera, bodyPoint = null) {
+    this.visibilityManager.update([camera], bodyPoint);
   }
 
   static load(id) {

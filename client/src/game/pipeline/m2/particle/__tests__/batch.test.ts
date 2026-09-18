@@ -74,7 +74,15 @@ describe('ParticleBatch', () => {
     expect(color.getW(0)).toBeCloseTo(1, 3);
   });
 
-  it('applies the scale track', () => {
+  /**
+   * THIS TEST USED TO ASSERT THE DEFECT. It expected the authored track value to reach `iScale`
+   * unchanged -- `(2, 3)` in, `(2, 3)` out -- which is exactly the missing conversion: the M2 track
+   * is a HALF-size and `iScale` is the full extent of a -0.5..0.5 quad, so the sprite rendered at
+   * half the size the file asks for. See `HALF_SIZE_TO_EXTENT` in `batch.ts` for the reference's
+   * byte-verified statement. Doubling the expectation rather than deleting the test, because the
+   * pass-through it pinned is still the thing worth pinning -- just against the right contract.
+   */
+  it('doubles the half-size scale track into the full extent of the quad', () => {
     const pool = new ParticlePool(4);
     seed(pool, [0, 0, 0], 5);
 
@@ -82,8 +90,8 @@ describe('ParticleBatch', () => {
     batch.pack(pool, definition, new THREE.Matrix4());
 
     const scale = batch.geometry.getAttribute('iScale');
-    expect(scale.getX(0)).toBeCloseTo(2, 4);
-    expect(scale.getY(0)).toBeCloseTo(3, 4);
+    expect(scale.getX(0)).toBeCloseTo(4, 4);
+    expect(scale.getY(0)).toBeCloseTo(6, 4);
   });
 
   it('derives the uv rect from the rows and columns of the flipbook', () => {

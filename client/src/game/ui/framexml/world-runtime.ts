@@ -56,7 +56,9 @@ import { Widget } from '../widget';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
 import { PrefetchedAddOn, prefetchStartupAddOns } from './addons';
 import { cacheKey, prefetchManifest, registerTreeArt } from './manifest';
-import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret, placeSelection } from './tick';
+import {
+  CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, mirrorEditBoxText, placeCaret, placeSelection,
+} from './tick';
 import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
@@ -83,7 +85,7 @@ import { installSpellsApi } from './lua/api/spells';
 import { installCursorApi } from './lua/api/cursor';
 import { installAddOnsApi, markAddOnLoaded } from './lua/api/addons';
 import { DEFAULT_BINDINGS, fetchBindings } from './bindings';
-import { invokeScriptHandler } from './lua/scripts';
+import { invokeCensus, invokeScriptHandler } from './lua/scripts';
 import type { FileReport } from './runtime';
 
 const FRAMEXML_DIR = 'Interface\\FrameXML\\';
@@ -967,7 +969,14 @@ export async function bootWorldRuntime(options: WorldRuntimeOptions): Promise<Wo
  * `buttons` per frame alongside `buttonMs` -- a walk that is expensive because it visits 2000 buttons is
  * a different defect from one that visits 20 slowly.
  */
-const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, buttons: 0 };
+const tickCensus = {
+  frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, buttons: 0, actionButtonMs: 0, actionButtons: 0,
+  // Lua ENTRIES attributable to the action-button phase -- see `scripts.ts#invokeCensus`. The
+  // phase's own loop runs one per shown button, but a handler body that fires another frame's
+  // handler enters Lua again and the loop cannot see it. `actionButtons` counts buttons; this
+  // counts calls, and the two differing is the finding.
+  actionButtonCalls: 0,
+};
 
 (window as unknown as Record<string, unknown>).uiTickCensus = () => {
   const n = Math.max(tickCensus.frames, 1);
@@ -977,10 +986,42 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
     perFrame: {
       editBoxMs: per(tickCensus.editBoxMs),
       buttonMs: per(tickCensus.buttonMs),
+      // **THE ACTION BUTTONS, SPLIT OUT FROM THE OTHER NAMED `OnUpdate` FRAMES.** `onUpdateMs` lumped
+      // some fifteen of them together -- bonus bar, casting bar, player frame, character model, quest
+      // fading, zone text, world map, chat edit boxes, buff frame, aura buttons AND the 24 action
+      // buttons -- so a report of "the tick costs 5.6 ms" could not say whether the action bar was any
+      // of it. That is the one question a frame-rate investigation of this session's action-bar work
+      // has to answer, and it was the one the census could not.
+      //
+      // `onUpdateMs` now EXCLUDES this, so the two are disjoint and `editBoxMs + buttonMs +
+      // onUpdateMs + actionButtonMs` is the whole tick.
+      actionButtonMs: per(tickCensus.actionButtonMs),
+      // **CALLS, NOT BUTTONS.** If this reads 8 the per-call cost is the gap; if it reads far more,
+      // the count was and the per-call price from the bench is right. `usPerCall` does the division
+      // so the comparison against the bench's 23.11 us is direct.
+      actionButtonCalls: Math.round((tickCensus.actionButtonCalls / n) * 10) / 10,
+      actionButtonUsPerCall: tickCensus.actionButtonCalls === 0
+        ? 0
+        : Math.round((tickCensus.actionButtonMs * 1000) / tickCensus.actionButtonCalls),
+      /** How many action buttons were `shown` and therefore ticked, averaged. */
+      actionButtons: Math.round(tickCensus.actionButtons / n),
       onUpdateMs: per(tickCensus.onUpdateMs),
       buttons: Math.round(tickCensus.buttons / n),
     },
-    totalPerFrameMs: per(tickCensus.editBoxMs + tickCensus.buttonMs + tickCensus.onUpdateMs),
+    // **LIVE LUA HANDLES -- read this before believing any explanation of `ui.tick`'s 6x spread.**
+    // Across the owner's samples that line has read 1.6, 3.4, 4.8, 5.6, 6.6 and 9.7 ms, which is
+    // MONOTONIC and therefore looks far more like a leak than like state. Every table crossing from
+    // Lua to JS mints a registry handle (`lua/vm.ts#toJs`) and only an explicit `unref` returns it;
+    // `lua/scripts.ts#callWithBothConventions` saves `this`/`event`/`argN` with `getGlobal` and
+    // unrefs none of them -- MEASURED at exactly **1.00 leaked handle per invocation** whenever
+    // `this` holds a table (`__bench__/script-call.test.ts`).
+    //
+    // A rising number here across two readings settles leak-versus-state without another hypothesis.
+    // Two subtractions to read, so it is free.
+    luaHandles: vm.liveHandles,
+    totalPerFrameMs: per(
+      tickCensus.editBoxMs + tickCensus.buttonMs + tickCensus.onUpdateMs + tickCensus.actionButtonMs,
+    ),
   };
 };
 
@@ -990,6 +1031,9 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
   tickCensus.buttonMs = 0;
   tickCensus.onUpdateMs = 0;
   tickCensus.buttons = 0;
+  tickCensus.actionButtonMs = 0;
+  tickCensus.actionButtons = 0;
+  tickCensus.actionButtonCalls = 0;
   return 'cleared';
 };
 
@@ -1015,9 +1059,9 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
       for (const { box, caret, selection } of editBoxes) {
-        if (box.textRegion !== null) {
-          box.textRegion.text = box.displayText;
-        }
+        // THROUGH `mirrorEditBoxText`, not a direct assignment: the horizontal window lives there
+        // and the caret and selection read the same one. See `tick.ts#editBoxWindow`.
+        mirrorEditBoxText(box);
         placeCaret(box, caret, input, litCaret);
         placeSelection(box, selection, input);
       }
@@ -1102,14 +1146,29 @@ const tickCensus = { frames: 0, editBoxMs: 0, buttonMs: 0, onUpdateMs: 0, button
       if (tempEnchantId !== null) {
         invokeScriptHandler(ctx, tempEnchantId, 'OnUpdate', [dt]);
       }
+      // EVERY OTHER NAMED FRAME IS ACCOUNTED FOR BY HERE -- the action buttons get their own phase
+      // below, so this stamp closes `onUpdateMs` before they run and the two never overlap.
+      const tPhase3 = performance.now();
+      tickCensus.onUpdateMs += tPhase3 - tPhase2;
+
       // The range indicator and the attack flash -- see `actionButtonIds`. Shown buttons only, which is
       // however many slots the character has filled.
+      //
+      // MEASURED SEPARATELY, because this is where this session's action-bar work lands and a census
+      // that could not separate it could not clear it either. Two `performance.now()` calls on a phase
+      // that already walks 24 ids, which is the same trade the three phases above already make.
+      let ticked = 0;
+      const callsBefore = invokeCensus.calls;
       for (const id of actionButtonIds) {
         if (registry.widget(id)?.shown) {
           invokeScriptHandler(ctx, id, 'OnUpdate', [dt]);
+          ticked += 1;
         }
       }
-      tickCensus.onUpdateMs += performance.now() - tPhase2;
+      tickCensus.actionButtons += ticked;
+      // NESTED ENTRIES INCLUDED, which is the whole point -- see `tickCensus.actionButtonCalls`.
+      tickCensus.actionButtonCalls += invokeCensus.calls - callsBefore;
+      tickCensus.actionButtonMs += performance.now() - tPhase3;
     },
     dispose: () => {
       registry.reset();

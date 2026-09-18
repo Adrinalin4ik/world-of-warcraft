@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { animCounters } from './counters';
 import { ModelAnim, Sequence } from './model-anim';
-import { ClockLaw, clockLaw, cursorMs, isStep, sampleQuat, sampleVec3, trackFor } from './tracks';
+import {
+  AnimBlock, ClockLaw, clockLaw, cursorMs, isStep, sampleQuat, sampleVec3, trackFor,
+} from './tracks';
 
 // Module-level scratch objects -- the solver runs per bone per instance per frame and must not
 // allocate.
@@ -689,6 +691,46 @@ export class InstanceAnim {
     return count;
   }
 
+  /**
+   * THE TRACK SLOT a bone channel reads, and THE CLOCK it reads at.
+   *
+   * A global-sequence block has no sequence timeline: it carries ONE track, read at index 0 whatever
+   * is playing, on a free-running clock that is a pure function of world time. So these two are the
+   * bone path's copy of the MATERIAL path's convention -- `material-channels.ts#channelTrackIndex`
+   * (`block.globalSequenceID > -1 ? 0 : seqIndex`) and `#channelTimeMs` (`model.globalSequenceCursor`)
+   * -- deliberately the same two rules and not a second reading of one clock, which is how this
+   * project's orientation defects happened.
+   *
+   * BEFORE THIS, THE BONE PATH IGNORED `globalSequenceID` ENTIRELY. `trackFor(def.rotation, seqIndex)`
+   * indexed a one-track global block by the armed sequence's index, so it hit track 0 only while
+   * sequence 0 was playing and read `undefined` -> null -> bind pose for every other sequence. On a
+   * character (156 sequences) that meant those bones were pinned at bind pose essentially always; on
+   * `LightningBolt_Missile` (1 sequence, and 18 global sequences carrying every animated track it has)
+   * it meant the lightning arcs sampled their own orbit at the wrong cursor -- a flick, then a frozen
+   * fan. `model-anim.ts#slotReadable` had already named this exact miss and left it alone.
+   *
+   * THE `globalSequenceID === -1` PATH IS BEHAVIOURALLY IDENTICAL, and that is the point: `slotFor`
+   * returns the `seqIndex` that was passed inline before, and `channelTimeMs` returns the `seqTimeMs`
+   * that was passed inline before. The added cost on it is one int field read and one compare per
+   * call, no allocation and no map lookup -- see `solveBones`' own header for the measured bound.
+   *
+   * WHY BOTH MIXES BELOW GET THE SAME TREATMENT. A global sequence's value does not depend on which
+   * sequence is playing, so sampling the cross-fade's outgoing slot and the overlay's slot through
+   * these same two rules makes `prev === current === overlay` for such a bone and turns both mixes
+   * into no-ops for it -- which is correct. Leaving the other two legs on the raw slot would have
+   * blended the right value toward the IDENTITY (an empty track leaves the scratch at bind pose) by
+   * `1 - w` for the length of every cross-fade: a dip, not a freeze, and far harder to see.
+   */
+  private static slotFor(block: AnimBlock, seqIndex: number): number {
+    return block.globalSequenceID > -1 ? 0 : seqIndex;
+  }
+
+  private channelTimeMs(block: AnimBlock, seqTimeMs: number, worldClockMs: number): number {
+    return block.globalSequenceID > -1
+      ? this.model.globalSequenceCursor(block.globalSequenceID, worldClockMs)
+      : seqTimeMs;
+  }
+
   private solveBone(index: number, worldClockMs: number): void {
     if (this.solved[index]) {
       return;
@@ -712,19 +754,22 @@ export class InstanceAnim {
     scratchQuat.set(0, 0, 0, 1);
     scratchScale.set(1, 1, 1);
 
-    const translation = trackFor(def.translation, seqIndex);
+    const translation = trackFor(def.translation, InstanceAnim.slotFor(def.translation, seqIndex));
     if (translation) {
-      sampleVec3(translation, isStep(def.translation), t, scratchPos);
+      const ms = this.channelTimeMs(def.translation, t, worldClockMs);
+      sampleVec3(translation, isStep(def.translation), ms, scratchPos);
     }
 
-    const rotation = trackFor(def.rotation, seqIndex);
+    const rotation = trackFor(def.rotation, InstanceAnim.slotFor(def.rotation, seqIndex));
     if (rotation) {
-      sampleQuat(rotation, isStep(def.rotation), t, scratchQuat);
+      const ms = this.channelTimeMs(def.rotation, t, worldClockMs);
+      sampleQuat(rotation, isStep(def.rotation), ms, scratchQuat);
     }
 
-    const scaling = trackFor(def.scaling, seqIndex);
+    const scaling = trackFor(def.scaling, InstanceAnim.slotFor(def.scaling, seqIndex));
     if (scaling) {
-      sampleVec3(scaling, isStep(def.scaling), t, scratchScale);
+      const ms = this.channelTimeMs(def.scaling, t, worldClockMs);
+      sampleVec3(scaling, isStep(def.scaling), ms, scratchScale);
     }
 
     // THE CROSS-FADE. The outgoing sequence is sampled from ITS OWN slot at ITS OWN cursor and mixed
@@ -748,17 +793,20 @@ export class InstanceAnim {
       blendQuat.set(0, 0, 0, 1);
       blendScale.set(1, 1, 1);
 
-      const prevTranslation = trackFor(def.translation, ps);
+      const prevTranslation = trackFor(def.translation, InstanceAnim.slotFor(def.translation, ps));
       if (prevTranslation) {
-        sampleVec3(prevTranslation, isStep(def.translation), pt, blendPos);
+        const ms = this.channelTimeMs(def.translation, pt, worldClockMs);
+        sampleVec3(prevTranslation, isStep(def.translation), ms, blendPos);
       }
-      const prevRotation = trackFor(def.rotation, ps);
+      const prevRotation = trackFor(def.rotation, InstanceAnim.slotFor(def.rotation, ps));
       if (prevRotation) {
-        sampleQuat(prevRotation, isStep(def.rotation), pt, blendQuat);
+        const ms = this.channelTimeMs(def.rotation, pt, worldClockMs);
+        sampleQuat(prevRotation, isStep(def.rotation), ms, blendQuat);
       }
-      const prevScaling = trackFor(def.scaling, ps);
+      const prevScaling = trackFor(def.scaling, InstanceAnim.slotFor(def.scaling, ps));
       if (prevScaling) {
-        sampleVec3(prevScaling, isStep(def.scaling), pt, blendScale);
+        const ms = this.channelTimeMs(def.scaling, pt, worldClockMs);
+        sampleVec3(prevScaling, isStep(def.scaling), ms, blendScale);
       }
 
       const alpha = 1 - w;
@@ -785,17 +833,20 @@ export class InstanceAnim {
       blendQuat.set(0, 0, 0, 1);
       blendScale.set(1, 1, 1);
 
-      const ovTranslation = trackFor(def.translation, os);
+      const ovTranslation = trackFor(def.translation, InstanceAnim.slotFor(def.translation, os));
       if (ovTranslation) {
-        sampleVec3(ovTranslation, isStep(def.translation), ot, blendPos);
+        const ms = this.channelTimeMs(def.translation, ot, worldClockMs);
+        sampleVec3(ovTranslation, isStep(def.translation), ms, blendPos);
       }
-      const ovRotation = trackFor(def.rotation, os);
+      const ovRotation = trackFor(def.rotation, InstanceAnim.slotFor(def.rotation, os));
       if (ovRotation) {
-        sampleQuat(ovRotation, isStep(def.rotation), ot, blendQuat);
+        const ms = this.channelTimeMs(def.rotation, ot, worldClockMs);
+        sampleQuat(ovRotation, isStep(def.rotation), ms, blendQuat);
       }
-      const ovScaling = trackFor(def.scaling, os);
+      const ovScaling = trackFor(def.scaling, InstanceAnim.slotFor(def.scaling, os));
       if (ovScaling) {
-        sampleVec3(ovScaling, isStep(def.scaling), ot, blendScale);
+        const ms = this.channelTimeMs(def.scaling, ot, worldClockMs);
+        sampleVec3(ovScaling, isStep(def.scaling), ms, blendScale);
       }
 
       // Toward the OVERLAY by its weight -- the opposite direction from the cross-fade above, where the

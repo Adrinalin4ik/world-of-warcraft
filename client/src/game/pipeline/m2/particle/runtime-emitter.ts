@@ -110,6 +110,32 @@ export class RuntimeEmitter {
     this.spawnParams.basis = elements;
   }
 
+  /**
+   * Set the emitter's inherited motion for the births this frame -- file flag `0x40`, see
+   * `integrate.ts#INHERIT_EMITTER_MOTION`. MODEL space, units per second; the manager rotates the
+   * world delta into this frame because it already holds the inverse for the trail's drift.
+   *
+   * Written onto the SAME `spawnParams` object `setBasis` writes, so it costs three field stores per
+   * emitter per frame and no allocation. Zero means "no inherit", which is both the unflagged case
+   * and a stationary emitter -- `spawnParticle` skips the add entirely on all-zero, so an emitter
+   * that never moves pays one three-way compare per birth.
+   */
+  /**
+   * The emitter's world matrix for BAKING orientation into each birth, or null to keep the cloud
+   * re-oriented per frame. See `integrate.ts#MODEL_SPACE`. Refreshed every frame by the manager so a
+   * birth bakes the rotation the bone has NOW, which is the whole point -- a later rotation must not
+   * reach it, but the one at its birth must.
+   */
+  setWorldLinear(elements: ArrayLike<number> | null) {
+    this.spawnParams.worldLinear = elements;
+  }
+
+  setInheritVelocity(x: number, y: number, z: number) {
+    this.spawnParams.inheritX = x;
+    this.spawnParams.inheritY = y;
+    this.spawnParams.inheritZ = z;
+  }
+
   private static computeTrackDurationMs(definition: any): number {
     let maxTimestamp = 0;
 

@@ -55,10 +55,41 @@ export const CAM_COLLISION_RADIUS = 0.3;
 export const CAM_RETURN_RATE = 6.0;
 
 /**
- * The camera near-plane distance (yd), shared by the projection and the self-avatar fade so the
- * model finishes fading exactly as the near plane would begin to slice it.
+ * **THE CAMERA NEAR PLANE (yd): the reference client's own 1/9.**
+ *
+ * Hardcoded in the client's camera constructor -- `0x50a6c0`, `+0x38 = 0x3de38e39`, which is sign 0,
+ * exponent 123 (2^-4) and mantissa 1.77778, i.e. exactly 0.111111
+ * (`samples/benilla/crates/benilla-world/src/view.rs:173-186`; the `nearclip` console cvar stores to
+ * a global with zero readers, so it is dead plumbing and this is the only live value).
+ *
+ * **IT WAS 1.0 HERE AND THE SENTENCE ABOVE IT WAS FALSE, WHICH IS HOW BOTH DEFECTS HID.** The old
+ * comment said this number was "shared by the projection and the self-avatar fade so the model
+ * finishes fading exactly as the near plane would begin to slice it". The projection never read it:
+ * the world camera was built with a near of **2.0** (`pages/game/index.tsx`), so
+ *
+ *  - the camera stops `CAM_COLLISION_RADIUS` = 0.3 yd from a wall and then clips everything within
+ *    2 yd of itself, which is the owner's "половина камеры проходит через стену" exactly -- the wall
+ *    it correctly stopped short of is inside its own near plane and is cut away, so the room beyond
+ *    shows through;
+ *  - and the avatar finished fading at 1.0 while the slicing began at 2.0, so the model was cut
+ *    open a full yard before it had gone.
+ *
+ * At 1/9 the collision radius is finally larger than the near plane -- 0.3 against 0.111 -- which is
+ * the relationship the boom has always assumed. The two numbers are now genuinely shared: the
+ * projection reads this constant and so does the fade.
+ *
+ * DEPTH PRECISION is the cost and it is worth stating plainly rather than waving at. The reference
+ * discounts it because its projection is `perspective_infinite_reverse_rh` on a float buffer, where
+ * `depth = near/z` makes relative precision independent of the near value -- ours is three's
+ * ordinary perspective on an integer buffer, so the argument does NOT transfer and the loss is
+ * real: with `far` at 500 the resolution at 500 yd goes from about 0.008 yd to about 0.13 yd.
+ *
+ * Taken anyway, because the GAME shipped this pair. The real client draws a farclip of up to 777 yd
+ * through a 1/9 near plane on 2010 hardware, which is direct evidence that the precision is
+ * workable rather than a hope. If distant coplanar surfaces flicker, that is where to look first,
+ * and `logarithmicDepthBuffer` is the knob -- not a bigger near plane, which is what caused this.
  */
-export const CAM_NEAR = 1.0;
+export const CAM_NEAR = 1 / 9;
 
 /** How far in front of the near plane the avatar has fully faded (yd). */
 export const SELF_FADE_WINDOW = 1.5;
@@ -215,6 +246,21 @@ export function seatCamera(
   const frac = Math.min(1, Math.max(0, rig.collisionDistance / boomLength));
   const position = head.clone().addScaledVector(boom, frac);
 
+  /**
+   * **THE POST-SWEEP FLOOR CLAMP IS GONE. It could not have worked and the owner's next frame proved
+   * it in one look.**
+   *
+   * It probed upward from the seated eye and, on finding an underside, lifted the eye by
+   * `distance + CAM_COLLISION_RADIUS`. A slab has THICKNESS, so that lands the eye inside the slab and
+   * not above its walking surface -- the picture was unchanged, which is exactly what he reported.
+   *
+   * Fixing a state the sweep should never have reached is the wrong layer. The camera's own gather now
+   * keeps any face the BODY could stand on, `NOCAMCOLLIDE` or not, so the boom stops at a floor
+   * instead of passing through it and needing rescue (`collision/wmo-provider.ts`).
+   *
+   * `floorCast` went with it rather than being kept "in case": an option no code reads is a
+   * claim that something uses it, and it was building a WALK cast every frame for nothing.
+   */
   rig.selfFadeAlpha = selfFadeAlpha(position.distanceTo(pivot));
 
   // In first person -- zoom 0, or the boom pulled all the way in -- the camera sits ON the pivot,

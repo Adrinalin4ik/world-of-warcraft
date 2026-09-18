@@ -141,6 +141,7 @@ export * as SpellIcon from './spell-icon';
 export * as SpellItemEnchantment from './spell-item-enchantment';
 export * as SpellItemEnchantmentCondition from './spell-item-enchantment-condition';
 export * as SpellMechanic from './spell-mechanic';
+export * as SpellMissileMotion from './spell-missile-motion';
 export * as SpellRadius from './spell-radius';
 export * as SpellRange from './spell-range';
 export * as SpellRuneCost from './spell-rune-cost';

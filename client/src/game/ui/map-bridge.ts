@@ -5,6 +5,7 @@ import type { LuaVM } from './framexml/lua/vm';
 import type World from '../world';
 import type { MethodContext } from './framexml/lua/object';
 import { publishMapSelection, clearMapSelection } from './map-selection';
+import { clearZone, notifyZoneChanged, publishZone } from './zone-watch';
 import { zoneHighlights, setHighlightScale, lastHoverTest } from '../pipeline/zone-highlight';
 import { isAreaExplored } from '../../network/game/object/update-object/explored-zones';
 import { BlobPolygon, setBlobSource } from './quest-blobs';
@@ -1807,6 +1808,21 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
   let lastArea = 0;
   let lastZone = '';
 
+  /**
+   * PUBLISHED, because the channel bridge needs the zone and cannot hear a Lua event.
+   *
+   * `ZONE_CHANGED_NEW_AREA` goes into the VM and only frames can subscribe to it. The channel bridge
+   * needs the zone NAME because a zone channel is called `General - <ZoneName>`
+   * (`ChatChannels.dbc`, see `dbc/chat-channel-data.ts`), and it has no way to ask a Lua event. So the
+   * value this poll already computes is published through a one-value sink -- see `ui/zone-watch.ts`
+   * for why that beats a second poll or a `runExpr` on some other edge.
+   *
+   * `where().zone` and not `lastZone`: the sink is read on the READER's schedule, not on this poll's,
+   * so it must answer the zone NOW rather than the one this poll last announced -- those differ for
+   * exactly one tick after a zone change, which is the tick the reader is most likely to ask on.
+   */
+  publishZone(() => where().zone);
+
   const poll = (): void => {
     if (disposed || !mapData.loaded) {
       return;
@@ -1825,12 +1841,20 @@ export function attachMapBridge(vm: LuaVM, world: World, ctx: MethodContext): Ma
     const zoneChanged = zone !== lastZone;
     lastZone = zone;
     fireEvent(vm, zoneChanged ? 'ZONE_CHANGED_NEW_AREA' : 'ZONE_CHANGED');
+    // AND to the TypeScript side, which cannot subscribe to a Lua event. Announced on the same edge
+    // and from the same value, so the two halves of the UI cannot disagree about the zone. See
+    // `ui/zone-watch.ts`.
+    if (zoneChanged) {
+      notifyZoneChanged(zone);
+    }
   };
 
   return {
     poll,
     dispose: () => {
       clearMapSelection();
+      // The zone sink closes over this world; a stale one would read a disposed map.
+      clearZone();
       disposed = true;
       delete (window as unknown as Record<string, unknown>).worldZone;
       delete (window as unknown as Record<string, unknown>).worldMap;

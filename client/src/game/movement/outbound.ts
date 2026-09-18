@@ -68,6 +68,13 @@ export function movementFlagsFor(state: PlayerMoveState, input: MovementInput): 
  */
 export interface MovementSink {
   streamMovement(state: PlayerMoveState, flags: number, nowSeconds: number): void;
+  /**
+   * Acknowledge a finished server-driven spline (`CMSG_MOVE_SPLINE_DONE`) -- see
+   * `movement/server-ride.ts`. The server holds us spline-controlled and DROPS EVERY MOVEMENT
+   * PACKET WE SEND until this arrives, so it is not optional in behaviour; it is optional in the
+   * interface only so a sink written before the ride existed still satisfies the type.
+   */
+  sendSplineDone?(state: PlayerMoveState, splineId: number): void;
 }
 
 let sink: MovementSink | null = null;
@@ -90,4 +97,20 @@ export function streamMovement(
     sink.streamMovement(state, state.moveFlags, nowSeconds);
   }
   state.lastFacing = state.faceYaw;
+}
+
+/**
+ * Publish the `CMSG_MOVE_SPLINE_DONE` a finished self-spline owes, through the same sink seam.
+ *
+ * NOT routed through `streamMovement`: the ride guard skips that call for the whole ride (the
+ * reference parks the outbound stream behind it, `player.rs:827` / `player.rs:882-886`), and the
+ * ack is a one-shot at the endpoint rather than a frame report. `state.moveFlags` is deliberately
+ * left as `serverRideFrame` set it -- 0, at rest -- rather than re-derived from an input word the
+ * ride never read.
+ *
+ * A no-op with no sink attached, exactly like `streamMovement`: that is what keeps
+ * `/game?offline=1` and every movement test working with nothing connected.
+ */
+export function streamSplineDone(state: PlayerMoveState, splineId: number): void {
+  sink?.sendSplineDone?.(state, splineId);
 }

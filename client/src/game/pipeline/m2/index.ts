@@ -23,7 +23,7 @@ import { isParticleTemplate } from './particle/template';
 import Submesh from './submesh';
 import { frameTrace, traceStage } from '../../perf/frame-trace';
 
-// Module-level scratch for `applySphericalBillboard` / `applyCylindricalZBillboard`.
+// Module-level scratch for `billboardBasis` / `applyBillboardBone`.
 //
 // These ran `camera.position.clone()`, three `new THREE.Vector3` and a `new THREE.Matrix4` PER
 // BILLBOARDED BONE PER FRAME, gated only on `cameraMoved` -- which is true on essentially every
@@ -39,6 +39,17 @@ const billboardForward = new THREE.Vector3();
 const billboardRight = new THREE.Vector3();
 const billboardUp = new THREE.Vector3();
 const billboardMatrix = new THREE.Matrix4();
+const billboardCamFwd = new THREE.Vector3();
+const billboardCamRight = new THREE.Vector3();
+const billboardCamUp = new THREE.Vector3();
+const billboardBx = new THREE.Vector3();
+const billboardBy = new THREE.Vector3();
+const billboardBz = new THREE.Vector3();
+const billboardKeptQuat = new THREE.Quaternion();
+const billboardParentQuat = new THREE.Quaternion();
+const billboardTargetQuat = new THREE.Quaternion();
+const billboardScratchPos = new THREE.Vector3();
+const billboardScratchScale = new THREE.Vector3();
 
 /**
  * The GROUND SELECTION RING's model-local radius -- `sqrt(0.5 * sqrt(dx^2 + dy^2))` over the **Stand**
@@ -1008,83 +1019,144 @@ class M2 extends THREE.Group {
     animCounters.posesApplied++;
   }
 
+  /**
+   * THE BILLBOARD BASIS -- the reference's `billboard_basis`
+   * (`samples/benilla/crates/benilla-world/src/billboard.rs:274-320`), ported.
+   *
+   * ## What was wrong, and it is the owner's exact words
+   *
+   * "the shield follows the character's heading, not the camera." The old writers built a LOCAL bone
+   * rotation out of the direction to the camera in MODEL space plus a row of
+   * `boneRoot.modelViewMatrix`. Two defects in one expression:
+   *
+   *   * A LOCAL rotation is composed UNDER the parent chain, so the host character's facing is
+   *     applied on top of it and the card rides the character's heading -- exactly the symptom. The
+   *     reference REPLACES the joint's fully-composed WORLD rotation (`billboard.rs:472-477`:
+   *     `rotation: billboard_basis(kind, rot, fwd, right, up)`, where `rot` is documented as "the
+   *     joint's fully-composed pre-billboard world rotation").
+   *   * `Object3D.modelViewMatrix` is NOT maintained by the scene graph. three writes it inside the
+   *     renderer, per drawn object, at render time -- so at update time it holds a PREVIOUS pass's
+   *     value, and this project renders a UI pass and a portrait booth with their own cameras. A
+   *     value that is wrong while every field around it inspects correctly is why six state checks
+   *     could not see this.
+   *
+   * ## The construction, from the reference
+   *
+   * Its inputs are the CAMERA's own world axes -- `let (fwd, right, up) = (*cam.forward(),
+   * *cam.right(), *cam.up())` (`billboard.rs:704`) -- never a model-space direction, never a
+   * model-view matrix. `bx/by/bz` are the bone's WoW-frame X/Y/Z as WORLD directions:
+   *
+   *   Spherical (0x08)  (bx, by, bz) = (-fwd, right, up)  "X toward the viewer, Y screen-right,
+   *                                                        Z screen-up (the view-space identity rows)"
+   *   LockZ (0x40)      bz = keptRot * up;    by = fwd x bz; bx = by x bz
+   *   LockX (0x10)      bx = keptRot * xAxis; bz = fwd x bx; by = bz x bx
+   *   LockY (0x20)      by = keptRot * yAxis; bx = fwd x by; bz = bx x by
+   *
+   * NO AXIS REMAP, the one deliberate deviation. The reference is Bevy (Y-up) and maps WoW axes into
+   * it as X->-Z, Y->-X, Z->+Y (`coords.rs`), which its own doc spells out. This client's world IS
+   * the WoW frame (`camera.up = (0, 0, 1)`), so the kept axes are taken directly: the reference's
+   * `kept_rot * Vec3::Y` (Bevy up) is `keptRot * (0, 0, 1)` here. Carrying that remap across instead
+   * of dropping it would be the fifth "two conventions meeting" defect in this area, every one of
+   * which was fixed by adopting a frame rather than by negating a coordinate.
+   *
+   * The degenerate case is the reference's too: a camera looking straight down the kept axis
+   * collapses the cross, and it holds screen-right rather than producing a NaN basis.
+   */
+  billboardBasis(kind, keptWorldQuat, camera, out) {
+    // three's camera looks down its local -Z, as Bevy's does.
+    billboardCamFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    billboardCamRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+    billboardCamUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+
+    const bx = billboardBx;
+    const by = billboardBy;
+    const bz = billboardBz;
+
+    switch (kind) {
+      case 0:
+        bx.copy(billboardCamFwd).multiplyScalar(-1);
+        by.copy(billboardCamRight);
+        bz.copy(billboardCamUp);
+        break;
+
+      case 3:
+        bz.set(0, 0, 1).applyQuaternion(keptWorldQuat);
+        if (bz.lengthSq() < 1e-12) { bz.set(0, 0, 1); } else { bz.normalize(); }
+        by.crossVectors(billboardCamFwd, bz);
+        if (by.lengthSq() < 1e-12) { by.copy(billboardCamRight); } else { by.normalize(); }
+        bx.crossVectors(by, bz);
+        break;
+
+      case 1:
+        bx.set(1, 0, 0).applyQuaternion(keptWorldQuat);
+        if (bx.lengthSq() < 1e-12) {
+          bx.copy(billboardCamFwd).multiplyScalar(-1);
+        } else { bx.normalize(); }
+        bz.crossVectors(billboardCamFwd, bx);
+        if (bz.lengthSq() < 1e-12) { bz.copy(billboardCamUp); } else { bz.normalize(); }
+        by.crossVectors(bz, bx);
+        break;
+
+      case 2:
+        by.set(0, 1, 0).applyQuaternion(keptWorldQuat);
+        if (by.lengthSq() < 1e-12) { by.copy(billboardCamRight); } else { by.normalize(); }
+        bx.crossVectors(billboardCamFwd, by);
+        if (bx.lengthSq() < 1e-12) {
+          bx.copy(billboardCamFwd).multiplyScalar(-1);
+        } else { bx.normalize(); }
+        bz.crossVectors(bx, by);
+        break;
+
+      default:
+        return false;
+    }
+
+    billboardMatrix.makeBasis(bx, by, bz);
+    out.setFromRotationMatrix(billboardMatrix);
+    return true;
+  }
+
+  /**
+   * Force one bone's WORLD rotation to the billboard basis, by writing the LOCAL rotation that
+   * composes to it: `local = inverse(parentWorldRot) . target`.
+   *
+   * This is what makes the card face the viewer rather than its owner. The parent's `matrixWorld` is
+   * this frame's if the caller has already walked it and last frame's otherwise -- a one-frame lag on
+   * the HOST's heading, which the previous implementation also had and which is invisible at any real
+   * turn rate. What it is NOT is the parent's rotation being applied on top of a camera-derived local
+   * rotation, which was the defect.
+   */
+  applyBillboardBone(camera, bone) {
+    const kind = bone.userData.billboardType;
+    if (typeof kind !== 'number') {
+      return;
+    }
+
+    // The joint's fully-composed pre-billboard WORLD rotation -- the reference's `normalize(rK)`,
+    // which the three lock arms read their kept axis out of.
+    bone.matrixWorld.decompose(billboardScratchPos, billboardKeptQuat, billboardScratchScale);
+    if (!this.billboardBasis(kind, billboardKeptQuat, camera, billboardTargetQuat)) {
+      return;
+    }
+
+    const parent = bone.parent;
+    if (parent) {
+      parent.matrixWorld.decompose(
+        billboardScratchPos, billboardParentQuat, billboardScratchScale,
+      );
+      billboardTargetQuat.premultiply(billboardParentQuat.invert());
+    }
+
+    bone.quaternion.copy(billboardTargetQuat);
+  }
+
   applyBillboards(camera) {
     for (let i = 0, len = this.billboards.length; i < len; ++i) {
-      const bone = this.billboards[i];
-
-      switch (bone.userData.billboardType) {
-        case 0:
-          this.applySphericalBillboard(camera, bone);
-          break;
-        case 3:
-          this.applyCylindricalZBillboard(camera, bone);
-          break;
-        default:
-          break;
-      }
+      // ONE arm for all four kinds now. The old dispatcher's `default: break` silently dropped
+      // cylindrical-X and cylindrical-Y, a gap measured at 52 bones across 2 of 726 models; the
+      // reference's basis handles all four, so it is gone.
+      this.applyBillboardBone(camera, this.billboards[i]);
     }
-  }
-
-  applySphericalBillboard(camera, bone) {
-    const boneRoot = bone.skin;
-
-    if (!boneRoot) {
-      return;
-    }
-
-    // `copy` then `worldToLocal`, NOT `worldToLocal(clone())`: same result, no allocation.
-    const camPos = this.worldToLocal(billboardCamPos.copy(camera.position));
-
-    const modelForward = billboardForward.set(camPos.x, camPos.y, camPos.z);
-    modelForward.normalize();
-
-    const modelVmEl = boneRoot.modelViewMatrix.elements;
-    const modelRight = billboardRight.set(modelVmEl[0], modelVmEl[4], modelVmEl[8]);
-    modelRight.multiplyScalar(-1);
-
-    const modelUp = billboardUp.set(0, 0, 0);
-    modelUp.crossVectors(modelForward, modelRight);
-    modelUp.normalize();
-
-    const rotateMatrix = billboardMatrix;
-
-    rotateMatrix.set(
-      modelForward.x,   modelRight.x,   modelUp.x,  0,
-      modelForward.y,   modelRight.y,   modelUp.y,  0,
-      modelForward.z,   modelRight.z,   modelUp.z,  0,
-      0,                0,              0,          1
-    );
-
-    bone.rotation.setFromRotationMatrix(rotateMatrix);
-  }
-
-  applyCylindricalZBillboard(camera, bone) {
-    const boneRoot = bone.skin;
-
-    if (!boneRoot) {
-      return;
-    }
-
-    const camPos = this.worldToLocal(billboardCamPos.copy(camera.position));
-
-    const modelForward = billboardForward.set(camPos.x, camPos.y, camPos.z);
-    modelForward.normalize();
-
-    const modelVmEl = boneRoot.modelViewMatrix.elements;
-    const modelRight = billboardRight.set(modelVmEl[0], modelVmEl[4], modelVmEl[8]);
-
-    const modelUp = billboardUp.set(0, 0, 1);
-
-    const rotateMatrix = billboardMatrix;
-
-    rotateMatrix.set(
-      modelForward.x,   modelRight.x,   modelUp.x,  0,
-      modelForward.y,   modelRight.y,   modelUp.y,  0,
-      modelForward.z,   modelRight.z,   modelUp.z,  0,
-      0,                0,              0,          1
-    );
-
-    bone.rotation.setFromRotationMatrix(rotateMatrix);
   }
 
   /**

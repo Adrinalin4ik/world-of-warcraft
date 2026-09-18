@@ -514,3 +514,58 @@ describe('the second weighted track', () => {
     expect(x(2000)).toBeCloseTo(0, 4);
   });
 });
+
+/**
+ * GLOBAL-SEQUENCE BONE CHANNELS. A global block has no sequence timeline: one track, read at index 0
+ * whatever is playing, on a free-running clock that is a pure function of world time.
+ *
+ * `model({ sequences: [...] })` is the GLOBAL sequence duration list, not the animation list --
+ * `ModelAnim` reads `data.sequences` into `globalSequenceDurations` (`model-anim.ts:412`) and builds
+ * `m.sequences` from `data.animations`. Easy to misread, and getting it backwards makes these pass
+ * for the wrong reason.
+ */
+const gsVec3 = (gs: number, values: number[][]) => ({
+  interpolationType: 1,
+  globalSequenceID: gs,
+  tracks: [{ animationIndex: 0, timestamps: [0, 400], values }],
+});
+
+describe('global-sequence bone channels', () => {
+  it('reads track 0 on the world clock whatever sequence INDEX is armed', () => {
+    const m = model({
+      animations: [animation(), animation({ id: 1 })],
+      sequences: [400],
+      bones: [bone({ translation: gsVec3(0, [[0, 0, 0], [8, 0, 0]]) })],
+    });
+    const inst = new InstanceAnim(m);
+    // Sequence INDEX 1, which is the whole point: the old bone path did `trackFor(block, 1)` on a
+    // one-track global block, read `undefined` and fell to bind pose. A character has 156 sequences,
+    // so index 0 was the rare case and "frozen" was the normal one.
+    inst.arm(m.sequences[1], 0);
+
+    inst.solveBones(200);
+    expect(new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 0)).x).toBeCloseTo(4, 4);
+
+    // And it WRAPS on the global period from world time -- 600 % 400 = 200, the same pose again.
+    inst.solveBones(600);
+    expect(new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 0)).x).toBeCloseTo(4, 4);
+  });
+
+  it('is a no-op through a cross-fade instead of dipping toward bind pose', () => {
+    const m = model({
+      animations: [animation(), animation({ id: 1 }), animation({ id: 2 })],
+      sequences: [400],
+      bones: [bone({ translation: gsVec3(0, [[0, 0, 0], [8, 0, 0]]) })],
+    });
+    const inst = new InstanceAnim(m);
+    inst.arm(m.sequences[1], 0);
+    // Opens a 150ms fade with the OUTGOING slot at index 1, so the outgoing leg's `trackFor(block, 1)`
+    // is the miss: it used to read `undefined`, leave `blendPos` at the identity, and lerp the correct
+    // value halfway to bind pose for the length of every transition. Sampling the outgoing leg through
+    // the same global rule makes prev === current and the mix a no-op.
+    inst.arm(m.sequences[2], 1000);
+    inst.solveBones(1075);
+    // 1075 % 400 = 275, so 275/400 of the way from 0 to 8.
+    expect(new THREE.Vector3().setFromMatrixPosition(matrixOf(inst, 0)).x).toBeCloseTo(5.5, 4);
+  });
+});

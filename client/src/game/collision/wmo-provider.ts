@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 
+import { collisionEpoch, placementHasSettled } from './collision-frame';
 import { wmoFaceIsCollidable } from './layers';
 import { CollisionLayer, Triangle } from './types';
 
@@ -26,6 +27,10 @@ export interface WmoCollider {
     matrix: THREE.Matrix4;
     worldBox: THREE.Box3;
     inverse: THREE.Matrix4;
+    /** The collision epoch `view.matrixWorld` was last refreshed in. See `collision-frame.ts`. */
+    refreshedIn: number;
+    /** **PLACED AND STABLE: stop refreshing this group's world matrix entirely.** */
+    settled: boolean;
   };
 }
 
@@ -59,6 +64,30 @@ export class WmoProvider {
    */
   private seen = new Set<number>();
 
+  /**
+   * **INTEGER CENSUS -- no clock.** The counts settle the question on their own: `visited` is the
+   * registry walk this provider pays per gather regardless of what it returns, `rejected` is how
+   * much of it the cheap world-box test throws away, and `refreshes` is the expensive part --
+   * `updateWorldMatrix(true, false)` recursing up each group's parent chain.
+   *
+   * `refreshes` falling to zero once the map has settled is the whole gate for the latch below, and
+   * it needs no timing to read. A count is exact where this browser's `performance.now()` is
+   * quantised to 100 us -- the resolution that made an earlier `gatherUs` median read only 0 or 100.
+   *
+   * **AND `registered` IS WHY THIS COUNTER EXISTS RATHER THAN AN ESTIMATE.** The commit that added
+   * the latch predicted a small saving from "8-11 groups", reasoning off the `visibleGroups` figure
+   * in the render stats. Measured: **`registered: 318`**, all 318 visited on every gather, four
+   * gathers a frame -- **1272 ancestor-chain walks per frame, not 35.** The estimate was 30x low and
+   * it under-sold the fix, which is the opposite of the usual direction and no more useful for it.
+   *
+   * `visibleGroups` IS NOT THE REGISTERED COUNT. The registry holds every streamed-in group whether
+   * it is on screen, behind the camera or occluded, and collision must consider all of them. This is
+   * the same error as reasoning from `visibleChunks` when `terrain.size` is 441 -- twice now, so the
+   * rule is: a per-frame cost is `registry.size x gathers`, and the registry size is read from the
+   * registry, never inferred from what is drawn.
+   */
+  readonly census = { gathers: 0, visited: 0, rejected: 0, refreshes: 0 };
+
   /** Registered group-collider count. Read by the collision debug overlay. */
   get size(): number {
     return this.colliders.size;
@@ -77,6 +106,9 @@ export class WmoProvider {
   }
 
   gather(worldBox: THREE.Box3, layer: CollisionLayer, out: Triangle[]): void {
+    this.census.gathers += 1;
+    this.census.visited += this.colliders.size;
+
     for (const collider of this.colliders.values()) {
       this.gatherOne(collider, worldBox, layer, out);
     }
@@ -105,6 +137,10 @@ export class WmoProvider {
       matrix: new THREE.Matrix4(),
       worldBox: new THREE.Box3(),
       inverse: new THREE.Matrix4(),
+      // Stamped with the CURRENT epoch: `gatherOne` has just refreshed the matrix, so it is already
+      // current for this epoch. Leaving it at 0 would refresh a second time needlessly.
+      refreshedIn: collisionEpoch(),
+      settled: false,
     };
 
     cache.matrix.copy(matrixWorld);
@@ -134,10 +170,34 @@ export class WmoProvider {
       return;
     }
 
-    // Same staleness guard as the doodad provider: a placement registered before its transform was
-    // resolved would query the BSP in the wrong frame, and the scene root does not walk static
-    // subtrees to fix it.
-    view.updateWorldMatrix(true, false);
+    // Same staleness guard as the doodad provider, and now the same LATCH -- see
+    // `collision-frame.ts`. This refresh was the third instance in this directory of one shape: an
+    // unconditional `updateWorldMatrix(true, false)` per registered placement per gather, recursing
+    // up the parent chain, paid BEFORE the cheap world-box rejection below and therefore paid in
+    // full by every group that contributes nothing. It is needed exactly once, after placement.
+    //
+    // `collisionEpoch() === 0` disables the skip outright, so every unit test keeps the old
+    // behaviour and the saving is opt-in by the app -- the reasoning and the epoch-0 defect it
+    // guards against are recorded in `collision-frame.ts`.
+    const cached = collider.cache;
+    if (
+      cached === undefined
+      || collisionEpoch() === 0
+      || (!cached.settled && cached.refreshedIn !== collisionEpoch())
+    ) {
+      view.updateWorldMatrix(true, false);
+      this.census.refreshes += 1;
+
+      if (cached !== undefined) {
+        cached.refreshedIn = collisionEpoch();
+        // Checked AFTER the refresh, against the matrix the last recompute stored: settling needs
+        // BOTH a non-zero translation (placement provably happened) and a matrix that did not move.
+        if (collisionEpoch() !== 0
+          && placementHasSettled(view.matrixWorld.elements, cached.matrix.elements)) {
+          cached.settled = true;
+        }
+      }
+    }
 
     const cache = this.cacheFor(collider);
 
@@ -145,6 +205,7 @@ export class WmoProvider {
     // city is nowhere near the query, and this rules it out with one box overlap instead of an inverse
     // matrix, a transformed box and a BSP descent.
     if (!cache.worldBox.intersectsBox(worldBox)) {
+      this.census.rejected += 1;
       return;
     }
 

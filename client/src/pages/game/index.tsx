@@ -21,7 +21,9 @@ import {
   CURSOR_POINT, classifyUnitCursor, cursorStem, questgiverHasQuest,
 } from '../../game/world/cursor-mode';
 import { pickUnit, pickUnitReport, drawnWorldBox } from '../../game/world/pick';
+import { CAM_NEAR } from '../../game/camera/rig';
 import { collisionWorld } from '../../game/collision/collision-world';
+import cancelCastOnMove from '../../game/classes/cast-cancel';
 import { CollisionLayer } from '../../game/collision/types';
 import { wantsDebugPanels } from '../debug-flags';
 import { REACTION_NEUTRAL, primeFactionTemplates, reactionFor } from '../../game/world/faction';
@@ -96,6 +98,30 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
   private frameHandle = 0;
   private stopped = false;
   /** Held bound, because `removeEventListener` needs the SAME function object `add` was given. */
+  /**
+   * **THE POINTER'S VIEWPORT RECT, CACHED -- because reading it per tick is a forced layout.**
+   *
+   * `updateHoverCursor` called `document.body.getBoundingClientRect()` on every cadence tick to turn
+   * the pointer into NDC. That call is a synchronous LAYOUT FLUSH: the browser must resolve the
+   * document before it can answer, and this page carries the whole interface DOM. Measured on the
+   * owner's panel, `ui.cursor` came in at **4.6 ms** where every earlier reading of that section was
+   * 0.0 or 0.1 -- and it is gated to about one frame in six, so the tick itself costs several times
+   * that.
+   *
+   * The rect can only change when the window does, and the renderer is already sized from
+   * `window.innerWidth/innerHeight` (`resize`), so `resize` is exactly where it is refreshed. Keeping
+   * the BODY rect rather than assuming `(0, 0, innerWidth, innerHeight)` preserves the current answer
+   * exactly, including any body offset, and preserves the property the pick instruments' own comment
+   * insists on: they measure against the same element `controls.tsx` does, so a probe and a real
+   * click cannot disagree about where the pointer is. This removes a cost; it does not move a
+   * coordinate.
+   *
+   * The two debug pick instruments keep their own live read -- they run once per invocation, not per
+   * frame, and a stale rect in an instrument is exactly the class of defect they were written to
+   * avoid.
+   */
+  private cursorBounds: { left: number; top: number; width: number; height: number } | null = null;
+
   private readonly onResize = () => this.resize();
   private readonly onWorldDisconnect = () => {
     // Once, and only forward. The socket emits `disconnect` and `Socket#dropSocket` can silence a
@@ -149,6 +175,9 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // The perf monitor exists either way -- it owns the frame ring and the CPU spans, which every
     // capture in this repo's performance record is taken from. Only its HUD is gated.
     this.perf = new PerfMonitor(document, this.showDebug);
+    // `window.perfReport()` -- the HUD's numbers as JSON. See `PerfMonitor#report` for why: a panel
+    // can only be read by eye, and comparing two routes needs numbers that subtract.
+    (window as never as Record<string, unknown>).perfReport = () => this.perf.report();
 
     if (this.showDebug) {
       this.stats = new Stats();
@@ -156,7 +185,11 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       this.stats.showPanel(0);
     }
 
-    this.camera = new THREE.PerspectiveCamera(45, this.aspectRatio, 2, 500);
+    // NEAR IS THE RIG'S CONSTANT, not a literal. It was 2.0 here while `CAM_NEAR` said 1.0 and its
+    // comment claimed the projection shared it -- so the camera clipped two yards of the world in
+    // front of itself while stopping 0.3 yd short of a wall, and showed the room through it. See
+    // `camera/rig.ts#CAM_NEAR` for the client's own value and the depth-precision trade.
+    this.camera = new THREE.PerspectiveCamera(45, this.aspectRatio, CAM_NEAR, 500);
     this.camera.name = 'MainCamera';
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(15, 0, 7);
@@ -177,7 +210,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     // It was also dead: the field was assigned, added and removed and read nowhere, and `update()` was
     // never called after construction, so it did not even describe the camera's current frustum. The
     // debug-camera pair below is still used by the visibility work; only the helper is gone.
-    this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, 2, 500);
+    this.debugCamera = new THREE.PerspectiveCamera(60, this.aspectRatio, CAM_NEAR, 500);
     this.debugCamera.name = 'DebugCamera';
     this.debugCamera.up.set(0, 0, 1);
     this.debugCamera.position.set(15, 0, 7);
@@ -425,6 +458,17 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
 
   /** The EditBox that owns the keyboard, or null. See `controls.tsx#onKeyDown`. */
   private uiKeyboardFocus = (): string | null => this.ui?.keyboardFocus ?? null;
+
+  /**
+   * A cancel-worthy movement edge -- the cast self-cancel's trigger. `controls.tsx` decides WHICH edges
+   * qualify (turn and pitch do not); `cast-cancel.ts` decides whether the cast in flight is one that
+   * movement breaks. This is only the wire between them.
+   */
+  private onMoveStart = (): void => {
+    if (this.game?.world) {
+      cancelCastOnMove(this.game.world);
+    }
+  };
 
   /**
    * The pick's options, built per click.
@@ -713,7 +757,8 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     }
 
     const world = this.game.world;
-    const bounds = document.body.getBoundingClientRect();
+    // Cached; refreshed by `resize`. See `cursorBounds` for the forced layout this removes.
+    const bounds = this.cursorBounds ?? this.refreshCursorBounds();
     const ndc = {
       x: ((pointer.x - bounds.left) / bounds.width) * 2 - 1,
       y: -(((pointer.y - bounds.top) / bounds.height) * 2 - 1),
@@ -758,6 +803,37 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
       return;
     }
     const world = this.game.world;
+
+    /**
+     * A NAMEPLATE IS CLICKABLE, and it is tried BEFORE the body pick -- the owner's
+     * "Нажатие на nameplate тоже должно выделять цель."
+     *
+     * ORDER, and it is the whole of why this sits here and not two lines earlier or later:
+     *
+     *   1. `this.ui?.pointerWidget` above still returns FIRST, so a Lua frame over a plate keeps the
+     *      click. The UI winning over the world is the existing law and a plate is world geometry --
+     *      inserting the test above that guard would let a nameplate steal a click meant for a frame.
+     *   2. The plate then beats the BODY, because a plate is drawn over the world and the thing under
+     *      the cursor is what the eye says it is. A body pick first would make a plate unclickable
+     *      wherever a mob stood behind another mob's plate.
+     *
+     * THROUGH `world.setTarget`, the same door the body click below uses and the ONE door to
+     * `CMSG_SET_SELECTION` (`world/index.ts:830`). Not a second source of truth for selection: the
+     * ring, the target frame and the Lua side follow exactly as they do for a body click, because
+     * this lane sets nothing itself.
+     *
+     * A GAMEOBJECT ARM IS DELIBERATELY ABSENT here -- `wants()` never gives a plate to anything
+     * without `fields`, so a plate can only ever name a unit and the object branch below cannot apply.
+     */
+    const plateGuid = world.nameplates.pickPlate(ndc, this.camera);
+    if (plateGuid !== null) {
+      const plated = world.entities.get(plateGuid);
+      if (plated) {
+        world.setTarget(plated);
+        return;
+      }
+    }
+
     const hit = pickUnit(world.entities.values(), this.camera, ndc, world.player, this.pickOptions());
     /**
      * A WORLD OBJECT IS NOT A TARGET, and this is the owner's "их почему-то можно выделить".
@@ -996,7 +1072,18 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
     return window.innerWidth / window.innerHeight;
   }
 
+  /** Re-read the viewport rect once, and hand it back for the first-use path. */
+  private refreshCursorBounds(): { left: number; top: number; width: number; height: number } {
+    const rect = document.body.getBoundingClientRect();
+    this.cursorBounds = {
+      left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+    };
+    return this.cursorBounds;
+  }
+
   resize() {
+    // The pointer rect follows the window and nothing else, so this is its one invalidation point.
+    this.refreshCursorBounds();
     if (this.renderer) {
       const scale = this.debug ? 2 : 1;
       this.renderer.setSize(window.innerWidth/scale, window.innerHeight/scale);
@@ -1177,6 +1264,7 @@ class GameScreen extends React.Component<IGameProps, IGameScreenState> {
             onWorldRightClick={this.onWorldRightClick}
             uiCapturedPress={this.uiCapturedPress}
             uiKeyboardFocus={this.uiKeyboardFocus}
+            onMoveStart={this.onMoveStart}
           />
           { this.showDebug && !this.isMobile && <DebugPanel ref={this.debugPanel} renderer={renderer} game={this.game}></DebugPanel>}
           { this.showDebug &&

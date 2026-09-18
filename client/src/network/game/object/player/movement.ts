@@ -285,7 +285,16 @@ export class PlayerMovementHandler extends EventEmitter {
   private lastSentPos = new THREE.Vector3(NaN, NaN, NaN);
 
   /** Counters the world-state probe reads to prove the outbound stream is real. */
-  public sent = { total: 0, heartbeats: 0, starts: 0, stops: 0, facings: 0, jumps: 0, lands: 0 };
+  public sent = {
+    total: 0, heartbeats: 0, starts: 0, stops: 0, facings: 0, jumps: 0, lands: 0,
+    /**
+     * `CMSG_MOVE_SPLINE_DONE` acks emitted -- the instrument for the self-spline ride. Should
+     * equal `objectHandler.monsterMovementHandler.stats.selfMoves` plus the self `Stop`s once every
+     * ride has finished; a gap means a ride never reached its end and the server is still holding
+     * our mover, which is the state in which it drops every movement packet we send.
+     */
+    splineDones: 0,
+  };
 
   public received = { relays: 0, speeds: 0, acks: 0, unhandled: 0 };
 
@@ -435,9 +444,33 @@ export class PlayerMovementHandler extends EventEmitter {
     );
   }
 
+  /**
+   * `SMSG_MOVE_KNOCK_BACK` -- STILL A NAMED GAP, and the self-spline ride does not close it.
+   *
+   * The two are different mechanisms and only one of them arrived this round. A spline knockback
+   * (the server pathing our mover) now works, because it comes down as an `SMSG_MONSTER_MOVE` for
+   * our guid like any other ride. THIS packet is the other kind: an IMPULSE, not a path -- the
+   * server hands the client a launch vector and the client integrates the arc itself, then acks on
+   * `CMSG_MOVE_KNOCK_BACK_ACK` (`opcode.js:242`, present in the table and never sent).
+   *
+   * **WHAT IT CARRIES IS NOT ESTABLISHED HERE and must not be guessed.** The reference does not
+   * decode this packet either -- `benilla-protocol` has the opcode in its NAME table only
+   * (`messages/opcode_names.rs:265-267`) and no reader for it -- and no capture of one has been
+   * through a residual on this project. So the body layout, the vertical field's sign convention
+   * and the ack's shape are all unread, and every one of them is a width trap of the class
+   * `CLAUDE.md` records as this project's most repeated silent defect. Closing this gap starts
+   * with a capture, not with a struct.
+   *
+   * Until then: nothing is decoded, no arc is seeded, no ack is sent, and the server is left
+   * waiting on an acknowledgement it will never receive.
+   */
   private handleKnockBack() {
     console.warn(
-      'movement: SMSG_MOVE_KNOCK_BACK received and NOT APPLIED -- no knockback arc in this client.',
+      'movement: SMSG_MOVE_KNOCK_BACK received and NOT APPLIED -- this is the IMPULSE form of a'
+      + ' knockback (a launch vector the client integrates itself, then acks on'
+      + ' CMSG_MOVE_KNOCK_BACK_ACK) and NOTHING in this client decodes its body. The SPLINE form'
+      + ' -- a server-pathed displacement such as Charge -- IS followed; see'
+      + ' game/movement/server-ride.ts.',
     );
     this.received.unhandled += 1;
   }
@@ -597,6 +630,96 @@ export class PlayerMovementHandler extends EventEmitter {
       return GameOpcode.MSG_MOVE_STOP_TURN;
     }
     return null;
+  }
+
+  /**
+   * **`CMSG_MOVE_SPLINE_DONE`: the acknowledgement a finished self-spline owes.**
+   *
+   * The server moved OUR mover with a spline (Charge, a knockback path, a taxi flight, a fear) and
+   * for a player mover it waits on this before it stops treating us as spline-controlled -- and
+   * while it waits it DROPS EVERY MOVEMENT PACKET WE SEND. So an unridden or unacked spline is not
+   * a cosmetic gap: it silently kills the outbound stream for the rest of the session. See
+   * `game/movement/server-ride.ts` for the ride this closes.
+   *
+   * THE BODY, and the one deliberate choice in it. The leading bytes are a `MovementInfo` -- for
+   * this client's 3.3.5a shape that INCLUDES the packed guid and the `flags2` half-word
+   * (`movementInfoSize`), which the reference's 1.12 writer has neither of; taking its struct
+   * verbatim is exactly the trap `CLAUDE.md` describes, so only the ORDER is taken from it. Then
+   * the `u32 splineId`. Then a trailing `float`:
+   *
+   *   - the reference writes one and says why (`benilla-protocol/src/messages/client.rs:286-302`,
+   *     byte-verified golden at `:373-403`): vmangos's `MoveSplineDone::ReadFromWorldPacket` does
+   *     an unconditional `read_skip<float>()`, the real client puts its completion fraction
+   *     `clamp(elapsed/duration, 0, 1)` there, and we only ever send at completion, so 1.0;
+   *   - THIS BUILD'S handler has not been read, so whether 3.3.5a still reads that fourth word is
+   *     UNVERIFIED. `CLAUDE.md`'s rule settles it without a capture: a server `ByteBuffer` throws
+   *     only on an UNDER-read and silently ignores trailing bytes it never reads, so including the
+   *     float is required if the word exists and harmless if it does not, while omitting it is
+   *     fatal in the first case -- and the failure mode of a short body is total silence, no
+   *     `SMSG_*_FAILURE` and a mover the server never releases. So: prefer the longer body.
+   *
+   * `flags` is 0 and `fallTime` is 0 -- the ride ended AT REST at the endpoint, which is also what
+   * `serverRideFrame` has just written into the mover state (`server-ride.ts#resumeAtRest`). The
+   * reference sends the same (`server_ride.rs:156-161`, `flags: 0`).
+   */
+  sendSplineDone(state: PlayerMoveState, splineId: number) {
+    const player = this.game.world && this.game.world.player;
+    // The same guid gate `streamMovement` applies, and for the same reason: before `join` rewrites
+    // it, `Session#player`'s guid is the literal string `'Player'`, which is truthy and packs to
+    // eight zero bytes. A body carrying a zero guid is dropped by the server, so the ack would
+    // vanish and the mover would stay held.
+    if (!player || !player.guid || packedGuidSize(player.guid) === 1) {
+      return;
+    }
+
+    const bodyBytes = movementInfoSize(player.guid, 0, 0) + 4 + 4;
+    // EXACTLY sized: `GameHandler#send` measures the ALLOCATED length, so slack goes out as
+    // declared payload.
+    const packet = new GamePacket(
+      GameOpcode.CMSG_MOVE_SPLINE_DONE,
+      GamePacket.HEADER_SIZE_OUTGOING + bodyBytes,
+    );
+    const facing = wireFacing(state.faceYaw);
+    const timeStamp = clientTicks();
+    writeMovementInfo(packet, {
+      guid: player.guid,
+      flags: 0,
+      flags2: 0,
+      timeStamp,
+      x: state.pos.x,
+      y: state.pos.y,
+      z: state.pos.z,
+      facing,
+      pitch: 0,
+      fallTime: 0,
+    });
+    packet.writeUnsignedInt(splineId >>> 0);
+    // The completion fraction. We only ever send at completion, so 1.0 -- see the header.
+    packet.writeFloat(1);
+    this.game.send(packet);
+
+    this.sent.total += 1;
+    this.sent.splineDones += 1;
+    // The server relocates us to this pose on receipt, so it IS the last position it has for us.
+    // Leaving the reconcile's baseline stale would make the next at-rest frame report a delta the
+    // server already has -- a heartbeat the server reads as movement, which cancels a cast.
+    this.lastSentPos.set(state.pos.x, state.pos.y, state.pos.z);
+    this.lastSentFacing = facing;
+    this.sentFlags = 0;
+
+    moveWire.record({
+      at: performance.now(),
+      opcode: opcodeName(GameOpcode.CMSG_MOVE_SPLINE_DONE),
+      flags: 0,
+      flags2: 0,
+      timeStamp,
+      x: state.pos.x,
+      y: state.pos.y,
+      z: state.pos.z,
+      facing,
+      fallTime: 0,
+      bodyBytes,
+    });
   }
 
   private send(

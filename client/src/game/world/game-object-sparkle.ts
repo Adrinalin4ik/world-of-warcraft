@@ -273,6 +273,13 @@ export class GameObjectSparkle {
 interface ParticleManager {
   register: (instance: unknown) => number;
   unregister: (instance: unknown) => void;
+  /**
+   * The readiness handle (`pipeline/m2/particle/manager.ts#ready`). Declared for shape, and NOT used
+   * here: this lane never registers from inside a promise handler -- `spawn` queues the model and the
+   * frame tick adopts it, which is the deferral this file already documents as the better answer to
+   * the same Bluebird warning. There is no handler to return a handle from.
+   */
+  ready: (instance: unknown) => Promise<void>;
 }
 
 /**

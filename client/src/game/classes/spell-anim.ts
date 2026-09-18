@@ -61,9 +61,41 @@
  * would snap the caster into a one-frame Stand and back -- a flicker, not an animation. `resolve(id,
  * false)` withholds that consolation precisely so "absent" stays distinguishable from "present".
  *
- * Spell 6603 "Auto Attack" is the case that proves the null path is right rather than a gap: it has
- * `visualID = 0`, so it resolves to nothing here, and that is correct -- its animation is one swing clip
- * per `SMSG_ATTACKERSTATEUPDATE`, which `network/game/object/combat.ts` already drives.
+ * ## SELF-REVIEW: THE PARAGRAPH ABOVE DESCRIBES AN INTENT THE CODE BELOW DOES NOT IMPLEMENT
+ *
+ * It used to end by citing spell 6603 "Auto Attack" as "the case that proves the null path is right
+ * rather than a gap: it has `visualID = 0`, so it resolves to nothing here". **That sentence was
+ * false.** `castAnimationFor` reaches the `owns(SPELL_CAST_DIRECTED)` leg for a chain that yields
+ * nothing exactly as it does for a kit that named a clip the model lacks -- `spellData.castAnimation`
+ * returns `null` for both and the two cannot be told apart here -- so a `visualID = 0` spell gets 53
+ * `SpellCastDirected`, not nothing. 6603 is invisible only because melee auto-attack never reaches
+ * this lane; `network/game/object/combat.ts` drives it off `SMSG_ATTACKERSTATEUPDATE`.
+ *
+ * IT IS VISIBLE ON THE WAND. Spell 5019 "Shoot" is a real cast that comes through here, and measured
+ * on the served `spell.dbc` it carries **`visualID = 0`** -- as does 75 "Auto Shot". So neither ranged
+ * auto-attack names any animation in the data at all, and the cast pose a wand user sees is this
+ * fallback, not a kit. (`AnimationData.dbc` has no wand row either: 506 rows, and the ranged names are
+ * ReadyBow 29 / AttackBow 46 / FireBow 47 / LoadBow 105 / LoadRifle 106 / LoadThrown 112 /
+ * HoldThrown 111 -- nothing wand-specific.)
+ *
+ * The narrowing that would fix it is NOT a wand special case: split "the chain yielded nothing" from
+ * "the kit named a clip this model lacks" and give the fallback only to the second, which is what the
+ * paragraph above already claims it is for. It is left un-narrowed here because it is not a one-line
+ * change to make safely -- measured on `spell.dbc` (49839 rows), **17100 spells carry `visualID = 0`
+ * and 11686 more have a visual with no cast kit, so 28786 rows (58%) take the fallback today** against
+ * 3218 whose kit exists but names a none-sentinel. Removing the release clip from 58% of the table on
+ * the strength of one wand report is the kind of change that needs the owner's eye, so it is filed
+ * rather than taken.
+ *
+ * And the real answer for a wand is a lane that does not exist here. The reference selects a ranged
+ * auto-attack pose from the RANGED-slot item's `(class, subclass)`, byte-verified against the client's
+ * `0x5fd460` -> LUT `0x5fd530` (`creature_anim/select.rs:573-593`): Bow -> LoadBow 105, Gun/Crossbow ->
+ * LoadRifle 106, Thrown -> LoadThrown 112, **Wand -> HoldThrown 111**, anything else -> ReadyUnarmed 25,
+ * with the promotion Load -> Hold at `select.rs:602-609` and "**Not** ReadyBow/AttackBow: no code in the
+ * client plays those rows" stated in the same doc. `combat-anim.ts` ports the MELEE half of that file
+ * (`swing_anim_main`, `select.rs:664-675`) and nothing of `ranged_load_anim`; grepping this tree for
+ * `HoldThrown`, `LoadBow` or a ranged selector finds none. So the ranged auto-attack lane is ABSENT,
+ * and that -- not this fallback -- is where a wand's pose belongs.
  */
 import Unit from './unit';
 import { spellData } from '../pipeline/dbc/spell-data';

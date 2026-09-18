@@ -524,11 +524,38 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
   /**
    * The `|Hitem:...|h[Name]|h` hyperlink `GetContainerItemLink` and `GetItemInfo` answer.
    *
-   * The twelve numeric fields after the entry are enchant, three gems, a suffix, a unique id, the
-   * player's level and three reforge/upgrade words. This client decodes none of them and writes zeros,
-   * which is what an unenchanted, ungemmed item's link genuinely is -- so the link is correct for the
-   * common case and understates a socketed one. `HandleModifiedItemClick` and the tooltip parse the
-   * entry out of position 2, which is the part that has to be right.
+   * **NINE NUMBERS IN TOTAL, OF WHICH THE ENTRY IS THE FIRST -- so EIGHT zeros follow it.** The count
+   * is spelled both ways here on purpose: confusing "numbers in the string" with "zeros after the
+   * entry" is exactly how this line was wrong twice in two commits, once in each direction.
+   *
+   * The nine are `itemId, enchantId, jewelId1..4, suffixId, uniqueId, linkLevel` -- the order every
+   * 3.3.5a-era consumer destructures with `strsplit(":", itemString)`. This client decodes none but the
+   * first and writes zeros, which is what an unenchanted, ungemmed item's link genuinely is: correct
+   * for the common case and understating a socketed one.
+   *
+   * **IT WROTE ELEVEN ZEROS, THEN NINE, AND NEITHER SENT.** The eleven came with a comment justifying
+   * three of them as "reforge/upgrade words" -- reforging is Cataclysm, upgrades are Mists, neither
+   * exists here -- so that shape was retail's. The nine was mine, off by one from misreading my own
+   * measurement. The owner saw the same symptom for both: a message containing only an item link is
+   * accepted by the field, sent on the wire, and produces NO REPLY -- while a spell link from the same
+   * field sends perfectly. A 3.3.5a server with strict link checking validates the field count before
+   * broadcasting and returns without a word, which is the silent signature this project knows from
+   * widths.
+   *
+   * THE COUNT IS TRANSCRIBED, NOT READ, and nothing available here can settle it: no file in the
+   * 264-file manifest builds an item string (the engine composes them), and the reference is 1.12 and
+   * writes `item:id:0:0:0` (`benilla-app/src/capture/fixtures.rs:1358`) -- which is itself proof that
+   * the number moves between versions and that benilla is not the authority on it. So this carries the
+   * same standing note as `framexml/bindings.ts`' default keys.
+   *
+   * WHY IT MIGHT MATTER BEYOND TIDINESS, stated as a hypothesis and not as a finding: the owner
+   * reports that a message containing ONLY a link does not send, and a 3.3.5a server with strict link
+   * checking validates the field count before broadcasting and drops the packet with no reply -- the
+   * same silent signature this project has been bitten by over widths. Whether that is the cause is
+   * for his next test to say; what is certain is that the old count could not be right.
+   *
+   * `HandleModifiedItemClick` and the tooltip parse the entry out of position 2 either way, which is
+   * the part that has to be right for anything local to work.
    */
   const itemLink = (item: SlotItem): string | null => {
     if (item.template === null) {
@@ -539,7 +566,7 @@ export function attachContainerBridge(vm: LuaVM, world: World, art: GlueArt): ()
       `local _,_,_,hex = GetItemQualityColor(${quality}) return hex`, 'item-link.lua',
     ) as { value?: unknown } | null;
     const hex = String(answer?.value ?? '|cffffffff');
-    return `${hex}|Hitem:${item.entry}:0:0:0:0:0:0:0:0:0:0|h[${item.template.name}]|h|r`;
+    return `${hex}|Hitem:${item.entry}:0:0:0:0:0:0:0:0|h[${item.template.name}]|h|r`;
   };
 
   // -- The globals --------------------------------------------------------------------------------

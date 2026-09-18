@@ -55,15 +55,18 @@ export function intersectRect(a: ScreenRect, b: ScreenRect): ScreenRect | null {
 /**
  * Clip a clip-space polygon against the near plane, returning the part in front of the eye.
  *
- * THIS IS NOT OPTIONAL, and leaving it out is what broke the first attempt at the rect flood.
- * A portal you are standing in the plane of has vertices on both sides of the eye. Projecting a
- * vertex with negative `w` divides by that negative value and flips it through the origin, so the
- * screen-space AABB of a mixed-sign polygon comes out SMALL and bounded where the true projection
- * is unbounded. The flood then collapses the branch and drops rooms that really are visible through
- * the doorway. The `w` clamp does not help: it only covers `w` near zero, not a polygon spanning it.
+ * **NOT THE CLIENT'S BEHAVIOUR, and not used by the portal flood. Kept for the record and its tests.**
  *
- * Clipping first also makes the projection well-conditioned. In a WebGL perspective matrix
- * `w_clip = -z_view`, so every surviving vertex has `w >= near`, and no sign flip is possible.
+ * This carried a paragraph beginning "THIS IS NOT OPTIONAL". That was wrong and the reference says so
+ * in as many words: the projection clips against "the four **side** planes of the view pyramid (there
+ * is NO near-plane clip)" (`benilla-world/src/wmo_portal/mod.rs:789-798`). A near clip is what makes a
+ * doorway the eye is close to degenerate and its room blink out, because the angle decides how many
+ * vertices fall behind the plane.
+ *
+ * What the flood uses is `clipPolygonToSidePlanes` below. The two are not interchangeable: the side
+ * clip discards a behind-the-eye vertex too, but replaces the edge through it with an interpolated
+ * boundary point at/near `w = 0`, which `ndcFromClip`'s clamp then blows out -- that is the straddled
+ * doorway staying open. A near clip removes the edge instead of moving it.
  *
  * Sutherland-Hodgman against the OpenGL near plane `z = -w`, i.e. inside where `z + w > 0`.
  */
@@ -103,6 +106,79 @@ export function clipPolygonToNearPlane(
   }
 
   return out.length >= 3 ? out : [];
+}
+
+/**
+ * **UNUSED, AND KEPT ONLY AS A RECORD OF WHY IT IS WRONG FOR PORTALS.**
+ *
+ * I added this to `projectToRect` and it collapsed the portals it was meant to widen: seven
+ * `rect-collapse` outcomes in thirteen attempts, including the doorway into the very group whose
+ * floor the owner was standing on. `w + x >= 0` is false for almost any vertex BEHIND the eye, since
+ * `w` is negative there -- so it discards exactly the vertices `ndcFromClip`'s clamp exists to
+ * handle, and those must survive for a straddled doorway to stay open.
+ *
+ * ---
+ *
+ * **SUTHERLAND-HODGMAN AGAINST THE FOUR SIDE PLANES -- and NOT against the near plane.**
+ *
+ * The reference's pairing, and both halves matter: "clip against the four **side** planes of the
+ * view pyramid (there is NO near-plane clip)"
+ * (`samples/benilla/crates/benilla-world/src/wmo_portal/mod.rs:789-798`).
+ *
+ * I removed the near clip on its own and shipped it, and the owner's next frame showed the cost: a
+ * STRAIGHT HORIZONTAL screen-space edge with the world missing below it, the player's own legs drawn
+ * past it. Geometry does not cut like that; a rect does. A vertex left behind the eye carries a large
+ * negative `w`, its mirrored NDC lands far from the polygon, and because the rect is a min/max over
+ * the vertices, that stray point can RAISE `minY` and slice a band off the bottom of the view. I even
+ * wrote in that commit that the failure to watch for was a portal opening too WIDE. It was the
+ * opposite.
+ *
+ * The side planes in clip space are `w + x >= 0`, `w - x >= 0`, `w + y >= 0`, `w - y >= 0`. Clipping
+ * against them brings every surviving vertex inside the view pyramid laterally, so no mirrored point
+ * can escape into the min/max -- while vertices behind the eye still survive, which is what the `w`
+ * clamp in `ndcFromClip` is for and what keeps a straddled doorway wide open.
+ */
+export function clipPolygonToSidePlanes(
+  vertices: ReadonlyArray<ArrayLike<number>>,
+): number[][] {
+  // `[axis, sign]`: the distance is `w + sign * v[axis]`.
+  const planes: Array<[number, number]> = [[0, 1], [0, -1], [1, 1], [1, -1]];
+
+  let poly: number[][] = vertices.map((v) => [v[0], v[1], v[2], v[3]]);
+
+  for (let p = 0; p < planes.length; ++p) {
+    const [axis, sign] = planes[p];
+    const count = poly.length;
+    if (count < 3) {
+      return [];
+    }
+
+    const out: number[][] = [];
+    for (let i = 0; i < count; ++i) {
+      const current = poly[i];
+      const next = poly[(i + 1) % count];
+      const dCurrent = current[3] + sign * current[axis];
+      const dNext = next[3] + sign * next[axis];
+      const currentInside = dCurrent >= 0;
+      const nextInside = dNext >= 0;
+
+      if (currentInside) {
+        out.push(current);
+      }
+      if (currentInside !== nextInside) {
+        const t = dCurrent / (dCurrent - dNext);
+        out.push([
+          current[0] + (next[0] - current[0]) * t,
+          current[1] + (next[1] - current[1]) * t,
+          current[2] + (next[2] - current[2]) * t,
+          current[3] + (next[3] - current[3]) * t,
+        ]);
+      }
+    }
+    poly = out;
+  }
+
+  return poly.length >= 3 ? poly : [];
 }
 
 /** Perspective divide with the client's `w` clamp. `clip` is `[x, y, z, w]`. */

@@ -45,10 +45,13 @@ import EventEmitter from 'events';
 import { GameHandler } from '../handler';
 import GameOpcode from '../opcode';
 import GamePacket from '../packet';
-import { GUID_BYTES, guidBytes } from '../../guid-hex';
+import { GUID_BYTES, guidBytes, guidHex } from '../../guid-hex';
 import { castAnimationFor, precastAnimationFor } from '../../../game/classes/spell-anim';
 import { spellData } from '../../../game/pipeline/dbc/spell-data';
 import { spellWire } from '../../../game/classes/spell-wire';
+import PendingCast from '../../../game/classes/pending-cast';
+import { ERR_NO_TARGET, resolveCastTarget } from '../../../game/classes/cast-target';
+import { initiatesAutoAttack, isOnNextSwing } from '../../../game/classes/auto-attack-start';
 // `GetTime()`'s clock. A cooldown's `start` is what the client's own Lua compares against, so the wire
 // side has to stamp it on the SAME clock -- see `lua/compat.ts#gameTime`.
 import { gameTime } from '../../../game/ui/framexml/lua/compat';
@@ -89,6 +92,75 @@ export interface ActionSlot {
 
 /** `spell 6603 "Auto Attack"` -- the melee auto-attack, which in the real client is a SPELL ON A BUTTON. */
 export const SPELL_AUTO_ATTACK = 6603;
+
+/**
+ * `SMSG_SPELL_GO`'s decoded target tail. See `SpellHandler#readSpellGoTargets` for the layout, the
+ * two width deltas and why `plausible` exists.
+ */
+export interface SpellGoTargets {
+  /** Units the cast LANDED on -- one missile each, and the impact kit plays on each. */
+  hits: string[];
+  /** Units it missed, with the wire's `SpellMissInfo`. A missile still flies at a missed target. */
+  misses: Array<{ guid: string; condition: number }>;
+  targetMask: number;
+  /** The ground point, when the mask carries one -- the location fallback's single projectile. */
+  dest: { x: number; y: number; z: number } | null;
+  /** False when the stride check failed or the body was short: treat the lists as unusable. */
+  plausible: boolean;
+}
+
+/**
+ * One live cooldown. `start` and `duration` are `GetTime()` SECONDS -- the shape
+ * `GetActionCooldown` and `GetSpellCooldown` return and `CooldownFrame_SetTimer` consumes.
+ *
+ * `fromGcd` is PROVENANCE, and it exists so a cancelled cast can give back the global cooldown
+ * without touching a real one. See `clearGlobalCooldown`.
+ */
+interface CooldownEntry {
+  start: number;
+  duration: number;
+  fromGcd: boolean;
+  /**
+   * **WHICH OF THE WRITERS PUT THIS HERE** -- the instrument for "something is supplying a cooldown
+   * the data does not".
+   *
+   * There are seven call sites and they fall into two kinds that a duration alone cannot separate:
+   * three DERIVE the number from `Spell.dbc` (`gcd`, `own`, `category`) and four take it from the
+   * SERVER (`wire-list`, `wire-event-own`, `wire-event-category`, `login`). When the owner reports a
+   * cooldown that the DBC says should not exist, the only question that matters is which kind made
+   * it -- and until now nothing recorded that, which is why a measurement of what the DATA says
+   * could not answer what the CODE did.
+   */
+  source: CooldownSource;
+}
+
+/**
+ * **WHICH LEGS OF A CONFIRMED CAST'S COOLDOWNS TO APPLY, and the split is the reference's.**
+ *
+ * `'gcd'` -- the global cooldown alone, which is what a cast's START may stamp.
+ * `'recovery'` -- the spell's own and its category's, which land at GO and NOWHERE EARLIER.
+ * `'all'` -- both, for an instant, whose GO is its only edge.
+ *
+ * The reference byte-verifies the boundary twice, from both sides. From the GO handler: "Our own
+ * launch starts the cast's cooldown locally, **at the GO** -- byte-VERIFIED ... `HandleSpellGo
+ * 0x6e7a70`'s self-insert tail ... the NO-ITEM spell leg (`0x6e8498`: SpellRec
+ * RecoveryTime/Category/CategoryRecoveryTime, onHold from Attributes bit 25, **start = the GO
+ * receive-time**)" (`benilla-app/src/net/apply/spells.rs:407-415`). And from the failure handler,
+ * stated as the reason a failed cast needs no revert: "the spell's own recovery **was never started
+ * pre-launch** (it lands at SPELL_GO / SMSG_SPELL_COOLDOWN, which a failed cast never reaches)"
+ * (`:99-103`). Only the GCD is armed early.
+ */
+type CooldownLegs = 'gcd' | 'recovery' | 'all';
+
+/** See `CooldownEntry#source`. Derived from the DBC, or taken from the server. */
+type CooldownSource =
+  | 'gcd'
+  | 'own'
+  | 'category'
+  | 'wire-list'
+  | 'wire-event-own'
+  | 'wire-event-category'
+  | 'login';
 
 export class SpellHandler extends EventEmitter {
   private game: GameHandler;
@@ -132,7 +204,7 @@ export class SpellHandler extends EventEmitter {
    * and the sweep pass both read the numbers rather than a boolean. `pruneCooldowns` drops them on the
    * next update so the map cannot grow without bound over a long session.
    */
-  private cooldowns = new Map<number, { start: number; duration: number }>();
+  private cooldowns = new Map<number, CooldownEntry>();
 
   /**
    * Spells of ours for which a `SMSG_SPELL_START` has been seen and the matching GO has not.
@@ -142,6 +214,45 @@ export class SpellHandler extends EventEmitter {
    * cast that never completes cannot leave an id in here and suppress the next instant's GCD.
    */
   private castStarted = new Set<number>();
+
+  /**
+   * **OUR QUEUED ON-NEXT-SWING SPELL** -- Heroic Strike, Cleave, Maul, Raptor Strike.
+   *
+   * The owner: "еще некоторые скилы, например у хантера или вара работают под следующий свинг.
+   * Смысл как с автоатакой, активируешь, дальше после свинга произойдет удар и начнется кд."
+   *
+   * **THE QUEUE IS THE SERVER'S, NOT OURS.** The press sends an ordinary `CMSG_CAST_SPELL`; the
+   * server drops it into its single `CURRENT_MELEE_SPELL` slot and fires it on its own swing timer.
+   * So there is nothing to send at swing time and no swing clock to keep -- this slot is BOOKKEEPING
+   * ONLY, for the two things the client owes: the button's checked ring, and keeping a queued strike
+   * out of the in-flight cast guard. The reference states the same division
+   * (`benilla-app/src/ui_cast.rs:164-199`: "queues on the server's melee slot ... Re-arming replaces
+   * silently: the server holds a single `CURRENT_MELEE_SPELL` slot").
+   *
+   * **WHY IT IS A SECOND SLOT AND NOT THE IN-FLIGHT GUARD.** In the reference the queued spell
+   * occupies the client's own inflight id, and the already-casting refusal at `6e4d97` then EXEMPTS
+   * it because the inflight record carries the `0x404` bits -- "so a queued Heroic Strike never
+   * blocks Rend". The reference models that observable with two slots rather than the client's
+   * push/pop pair (`ui_cast.rs:78-79`: "the on-next-swing class never occupies this guard at all --
+   * it arms `QueuedMeleeSpell` instead, so this guard only ever holds ordinary casts and the gate
+   * needs no attribute test"). This is that second slot, for that reason.
+   *
+   * **DEADLINE-LESS AND WIRE-CLEARED**, like the reference's: no timer touches it. It clears on
+   * `SMSG_SPELL_GO` -- which for this class IS the landing, because the server sends GO when its
+   * swing fires the strike -- and on `SMSG_CAST_FAILED` / `SMSG_SPELL_FAILURE` when the queue dies
+   * (target death, replacement, cancel). Id-keyed, like every reap here.
+   */
+  private queuedMelee: number | null = null;
+
+  /**
+   * The queued on-next-swing spell, or null -- what the button's checked ring reads.
+   *
+   * The reference's checked state reads BOTH slots (`ui_cast.rs:170-173`, the `IsCurrentAction` C2
+   * leg), which is why this is exposed rather than private to the fork.
+   */
+  get queuedMeleeSpell(): number | null {
+    return this.queuedMelee;
+  }
 
   /**
    * THE POSE CURRENTLY HELD, per caster guid: which spell armed it and which clip it is.
@@ -160,6 +271,17 @@ export class SpellHandler extends EventEmitter {
    * GO, at a failure, and at an interrupt, so it holds at most one entry per actively-casting unit.
    */
   private castPose = new Map<string, { spellId: number; animId: number }>();
+
+  /**
+   * OUR OWN OUTSTANDING CAST -- the optimistic in-flight guard that makes a second press of a spell
+   * mid-cast a no-op instead of a cast-bar kill. See `game/classes/pending-cast.ts` for the whole
+   * mechanism, the reference citations and the bug it closes.
+   *
+   * Lives here because this is the one class that both SENDS the cast and receives every packet that
+   * resolves it, which is what keeps the arm and the clear from drifting apart -- the reference's
+   * "ONE cast-send path" rule (`ui_action/cast_send.rs:216-218`).
+   */
+  private pendingCast = new PendingCast();
 
   /**
    * The last `SMSG_UPDATE_COMBO_POINTS`: how many points, and WHICH unit they are banked against.
@@ -433,6 +555,11 @@ export class SpellHandler extends EventEmitter {
       );
       return;
     }
+    // The cast is now longer than START said, so the guard's deadline has to follow it or the guard
+    // would lapse mid-cast and let a press through.
+    if (caster === this.game.world.player?.guid) {
+      this.pendingCast.delay(delayMs, Date.now());
+    }
     this.emit('spellDelayed', { caster, delayMs });
   }
 
@@ -471,11 +598,26 @@ export class SpellHandler extends EventEmitter {
     // A cast that broke never reaches GO, so its id must be dropped here or it would suppress the
     // global cooldown of the next INSTANT cast of the same spell (see `castStarted`).
     this.castStarted.delete(spellId);
+    // The queue dies with it: a failing `SMSG_SPELL_FAILURE` on the PREPARING melee slot is one of
+    // the reference's three clear edges (`ui_cast.rs:176-183`). Id-keyed.
+    this.clearQueuedMelee(spellId);
     // AND the held pose must be given up, or the caster stands in it for the rest of the session: the pose
     // is a LOOP and `externalSeq`'s release "never releases a loop" by design. GO is what normally takes
     // the latch back, and a broken cast never gets there. Gated on this spell having armed a pose so a
     // failure cannot drop a latch belonging to something else.
     this.releaseCastPose(caster, spellId);
+    // Our own cast broke: open the guard AND GIVE BACK THE GLOBAL COOLDOWN. A peer's failure is
+    // neither our guard's business nor our bar's -- the GCD is ours alone.
+    //
+    // This is the owner's second report ("если мы кастуем и каст прервался ... то гкд сбрасывается")
+    // on the wire-driven edge: a timed cast stamps the GCD at `SMSG_SPELL_START` and, until now,
+    // nothing took it back when the cast did not finish. The reference's model is arm-at-send +
+    // clear-on-failure (`ui_action/cast_send.rs:643-647`); `clearGlobalCooldown` is that clear, and it
+    // drops ONLY `fromGcd` entries so a real cooldown the server started survives the interrupt.
+    if (caster === this.game.world.player?.guid) {
+      this.pendingCast.clearIf(spellId);
+      this.clearGlobalCooldown();
+    }
     this.emit('spellFailure', { caster, spellId });
   }
 
@@ -497,14 +639,131 @@ export class SpellHandler extends EventEmitter {
    *     his `DEATH` latch dropped and the corpse stands up.
    *
    * A no-op is the common and correct outcome: most refusals concern a spell that never started.
+   *
+   * ## IT ALSO REAPS THE CAST'S KIT EFFECTS, and that is why it is the single exit
+   *
+   * The precast stage arms two things on the same edge -- a held POSE and a set of persistent emitter
+   * MODELS (`world/spell-kit-effects.ts`) -- so both have to end on the same edge too. Every existing
+   * way out of a cast already funnels here: `SMSG_SPELL_FAILURE`, `SMSG_CAST_FAILED`, a GO with no
+   * release clip, Escape (`ui/target-bridge.ts`) and the movement cancel
+   * (`classes/cast-cancel.ts`). Reaping here rather than at those five call sites is what stops a
+   * cancelled cast leaving a glow burning on the caster for the rest of the session -- the exact
+   * failure mode the pose half already had.
+   *
+   * The reap is BEFORE the pose guards and not behind them, deliberately: those guards ask whether
+   * this spell armed the latch, and a spell can carry kit slots without carrying a pose at all (the
+   * kit's anim column is one of twelve). Behind the guard, such a cast would keep its glow for ever.
+   * The reap is itself spell-id keyed, so it cannot touch another spell's instances.
    */
-  private releaseCastPose(casterGuid: string, spellId: number): void {
+  releaseCastPose(casterGuid: string | null, spellId: number): void {
+    if (casterGuid === null) {
+      return;
+    }
+    this.game.world.spellKitEffects.reap(casterGuid, spellId);
     const pose = this.castPose.get(casterGuid);
     if (pose === undefined || pose.spellId !== spellId) {
       return;
     }
     this.castPose.delete(casterGuid);
     this.game.world.entities.get(casterGuid)?.releaseAnimationLatch(pose.animId);
+  }
+
+  /**
+   * **THE WHOLE VERDICT IN ONE LINE** -- `window.session.protocol.game.objectHandler.spellHandler
+   * .castVerdict()`.
+   *
+   * Written because the owner has twice been asked for a console read plus timestamps and has
+   * answered with observations instead -- which is the right response to a six-step ask. One
+   * command, one string, nothing to interpret at his end.
+   *
+   * It answers, for the LAST cast this client sent: which spell, how many milliseconds elapsed
+   * between `CAST_SENT` and its `SPELL_GO` (the send-to-landing gap), and whether that spell now has
+   * a cooldown row -- with its duration, WHICH of the seven writers made it, and whether that writer
+   * derived the number from the DBC or took it from the server.
+   *
+   * **THE GAP IS THE NUMBER THAT DECIDES THE MID-SWING QUESTION**, and it decides it without a swing
+   * clock, which this client does not have. If the server queues a strike to the next swing, the gap
+   * is the remaining swing time -- hundreds of milliseconds to a couple of seconds, and DIFFERENT
+   * for a press early in the swing versus late in it. If the server fires it at once, the gap is one
+   * round trip (tens of ms) and does not vary with when in the swing it was pressed. So two presses,
+   * one early and one late, settle it: two similar small gaps mean no queueing, two different larger
+   * gaps mean queueing is real and the landing is genuinely later than the press.
+   */
+  castVerdict(): string {
+    const rows = spellWire.history();
+    let sent: { at: number; spellId: number } | null = null;
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      if (rows[i].kind === 'CAST_SENT') {
+        sent = { at: rows[i].at, spellId: rows[i].spellId };
+        break;
+      }
+    }
+    if (sent === null) {
+      return 'castVerdict: no cast has been sent this session.';
+    }
+    const go = rows.find((r) => r.kind === 'SPELL_GO' && r.spellId === sent.spellId
+      && r.at >= (sent as { at: number }).at);
+    const name = spellData.spell(sent.spellId)?.name ?? '?';
+    const gap = go === undefined ? null : Math.round(go.at - sent.at);
+    const entry = this.cooldowns.get(sent.spellId);
+    const now = gameTime();
+    const live = entry !== undefined && entry.start + entry.duration > now;
+    const cd = !live || entry === undefined
+      ? 'no cooldown row'
+      : `cooldown ${Math.round(entry.duration * 1000)} ms`
+        + ` (${Math.round((entry.start + entry.duration - now) * 1000)} ms left),`
+        + ` source=${entry.source},`
+        + ` ${entry.source === 'gcd' || entry.source === 'own' || entry.source === 'category'
+          ? 'DERIVED by this client' : 'SENT by the server'}`;
+    return `castVerdict: spell ${sent.spellId} ${name} -- `
+      + `send->GO ${gap === null ? 'GO NOT SEEN YET' : `${gap} ms`}; ${cd}`;
+  }
+
+  /**
+   * **EVERY LIVE COOLDOWN WITH ITS PROVENANCE** -- `window.session.protocol.game.objectHandler
+   * .spellHandler.cooldownReport()`.
+   *
+   * The instrument this area was missing, and the reason a whole round's conclusion could be wrong
+   * while every measurement in it was right: last round measured what `Spell.dbc` SAYS (Heroic
+   * Strike 78 is off-GCD -- `startRecoveryCategory` 0, `startRecoveryTime` 0) and concluded no code
+   * was needed. That is only sound if the code reads that zero as a zero, and nothing here reported
+   * what the code actually DID. This reports it.
+   *
+   * One row per live cooldown: the spell, its remaining time, and WHICH of the seven writers made
+   * it. `derived` separates the two kinds at a glance -- true means this client computed the number
+   * from the DBC, false means the server sent it. For a spell the DBC says has no cooldown, a row at
+   * all is the finding, and `source` says whose it is.
+   *
+   * Sorted longest-remaining first, so a 1.5 s GCD sweep and a 2-minute racial do not have to be
+   * hunted for. Called from a console, never per frame.
+   */
+  cooldownReport(): Array<{
+    spellId: number;
+    name: string | null;
+    remainingMs: number;
+    durationMs: number;
+    source: CooldownSource;
+    derived: boolean;
+    fromGcd: boolean;
+  }> {
+    const now = gameTime();
+    const out = [];
+    for (const [spellId, entry] of this.cooldowns) {
+      const remainingMs = Math.round((entry.start + entry.duration - now) * 1000);
+      if (remainingMs <= 0) {
+        continue;
+      }
+      out.push({
+        spellId,
+        name: spellData.spell(spellId)?.name ?? null,
+        remainingMs,
+        durationMs: Math.round(entry.duration * 1000),
+        source: entry.source,
+        derived: entry.source === 'gcd' || entry.source === 'own' || entry.source === 'category',
+        fromGcd: entry.fromGcd,
+      });
+    }
+    return out.sort((a, b) => b.remainingMs - a.remainingMs);
   }
 
   /** `GetActionCooldown`'s two numbers for one spell, or null when nothing is running. */
@@ -527,7 +786,13 @@ export class SpellHandler extends EventEmitter {
    * spell that is on a 30-second cooldown of its own must not cut it to 1.5 s. The real client keeps the
    * later expiry for exactly this reason -- every cast puts the GCD on every spell on the bar.
    */
-  private setCooldown(spellId: number, durationMs: number, startAt = gameTime()): boolean {
+  private setCooldown(
+    spellId: number,
+    durationMs: number,
+    startAt = gameTime(),
+    fromGcd = false,
+    source: CooldownSource = 'wire-list',
+  ): boolean {
     if (spellId <= 0) {
       return false;
     }
@@ -539,8 +804,42 @@ export class SpellHandler extends EventEmitter {
     if (existing !== undefined && existing.start + existing.duration > startAt + duration) {
       return false;
     }
-    this.cooldowns.set(spellId, { start: startAt, duration });
+    this.cooldowns.set(spellId, { start: startAt, duration, fromGcd, source });
     return true;
+  }
+
+  /**
+   * **CLEAR THE GLOBAL COOLDOWN, and only it** -- the owner's "если мы кастуем и каст прервался
+   * из-за движения или мы сами его отменили как-то, то гкд сбрасывается".
+   *
+   * The reference states both halves of the real client's model and byte-verifies them: the GCD is
+   * armed at SEND (`StartGlobalCooldown 0x6e2de0` from the cast-send arm `0x6e58fb`) and "a later
+   * `SMSG_CAST_RESULT` failure clears it again (`0x6e1630`)"
+   * (`benilla-app/src/ui_action/cast_send.rs:643-647`). So a cast that does not complete gives the
+   * global cooldown back; this is that clear.
+   *
+   * **`fromGcd` IS THE WHOLE POINT, and without it this would be the wrong fix.** A real cooldown
+   * must survive an interrupted cast -- a 2-minute racial whose cooldown the server started is not
+   * refunded because a later cast was cancelled -- so the entries have provenance and only the ones
+   * the GCD pass wrote are dropped. The two cannot be told apart by DURATION: a 1.5 s spell cooldown
+   * exists, and `setCooldown`'s longer-wins rule means a real cooldown that landed on a spell already
+   * carrying a GCD has already replaced the entry and cleared the flag with it.
+   *
+   * Returns whether anything was dropped, so the caller decides whether to announce -- the discarded
+   * -return defect class this project records twice.
+   */
+  clearGlobalCooldown(): boolean {
+    let changed = false;
+    for (const [spellId, entry] of this.cooldowns) {
+      if (entry.fromGcd) {
+        this.cooldowns.delete(spellId);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.announceCooldowns();
+    }
+    return changed;
   }
 
   /** Drop entries whose expiry has passed, so a long session's map stays the size of the live set. */
@@ -554,47 +853,100 @@ export class SpellHandler extends EventEmitter {
   }
 
   /**
-   * THE GLOBAL COOLDOWN, applied on our own confirmed cast.
+   * **ALL THREE COOLDOWNS a confirmed cast of ours starts** -- the global one, the spell's own, and
+   * its category's. Renamed from `applyGlobalCooldown`, which named only the first of the three and
+   * is why a gate meant for that one was allowed to skip the other two; see leg (1).
    *
-   * Applied at `SMSG_SPELL_GO` and not at the click, deliberately: a cast the server refuses
-   * (`SMSG_CAST_FAILED`) triggers no GCD in the real client, and `Gesf` -- who is refused every cast --
-   * would otherwise show a full bar of sweeps for a cast that never happened. GO is the server's
-   * confirmation, and it is also where this file already arms the caster's animation.
+   * ## WHEN it is applied, and a STATED DEVIATION from the reference
+   *
+   * This runs on the server's CONFIRMATION -- `SMSG_SPELL_START` for a timed cast, `SMSG_SPELL_GO`
+   * for an instant, with `castStarted` keeping one cast from stamping twice.
+   *
+   * **The real client does it differently and the previous version of this comment misdescribed
+   * it.** It said the GCD is applied at GO rather than at the click because "a cast the server
+   * refuses triggers no GCD in the real client". The OUTCOME is right; the mechanism is not. The
+   * reference byte-verifies both halves: the client arms the GCD **at send**
+   * (`StartGlobalCooldown 0x6e2de0` from the cast-send arm `0x6e58fb`) and "a later
+   * `SMSG_CAST_RESULT` failure clears it again (`0x6e1630`)"
+   * (`benilla-app/src/ui_action/cast_send.rs:643-647`). So it arms optimistically and gives it back,
+   * where we simply never arm.
+   *
+   * The visible difference is one round trip: the real client's sweep starts on the keypress, ours
+   * about 150 ms later when the confirmation lands. Arming at send is left for a scoped round --
+   * `clearGlobalCooldown` is the half the owner asked for and is now built, so moving the arm point
+   * is a one-line change with the clear already in place. Named rather than quietly kept.
    *
    * The GCD goes on every KNOWN spell sharing the category, which is the client's rule and is why the
    * whole bar dims at once. Spells not known are skipped -- they cannot be on a button.
    */
-  private applyGlobalCooldown(spellId: number): boolean {
+  private applyCastCooldowns(spellId: number, legs: CooldownLegs = 'all'): boolean {
     const cast = spellData.spell(spellId);
-    if (cast === null || cast.startRecoveryCategory === 0 || cast.startRecoveryTimeMs <= 0) {
-      // Off-GCD, and correctly so for Heroic Strike (78) and Auto Attack (6603) -- both read category 0
-      // and time 0 on the served file. `spellData` being absent also lands here, which is honest: with
-      // no table there is no GCD to compute and the bar simply shows none.
+    if (cast === null) {
+      // No table, so nothing to derive. Honest rather than silent: with `Spell.dbc` absent the bar
+      // shows no cooldown at all, and the server's own `SMSG_SPELL_COOLDOWN` still lands if it comes.
       return false;
     }
     const at = gameTime();
     let changed = false;
-    for (const known of this.known) {
-      const row = spellData.spell(known);
-      if (row === null || row.startRecoveryCategory !== cast.startRecoveryCategory) {
-        continue;
-      }
-      if (this.setCooldown(known, cast.startRecoveryTimeMs, at)) {
-        changed = true;
+
+    // ── (1) THE GLOBAL COOLDOWN, across the GCD category. GATED, and the gate now covers ONLY this
+    // loop, which is the whole of the owner's first defect.
+    //
+    // "у нас не имплементировано общий кулдаун способностей, например если я жму Каждый сам за себя,
+    // у меня не появляется кд, хотя должно быть 2 минуты. При этом гкд проходит как надо."
+    //
+    // This method used to open with that gate as an EARLY RETURN over the entire body, so an OFF-GCD
+    // spell never reached legs (2) or (3) below and got no cooldown of any kind. Every Man for Himself
+    // is exactly that spell -- measured on the served `spell.dbc`, it reads
+    // `startRecoveryCategory = 0`, `startRecoveryTime = 0`, so the gate fired and its real 120000 ms
+    // was never applied. The owner's own two observations fall straight out of the same line: the GCD
+    // "proceeds as it should" because an ON-GCD spell passes the gate and then reaches everything, and
+    // the per-spell cooldown is missing precisely for the spells that do not.
+    //
+    // Measured, so the scale of it is a number rather than a guess -- every one of these was silently
+    // cooldown-less: Every Man for Himself 59752 (category 1182, 120000 category), Blood Fury 20572
+    // (120000 own), Berserking 26297 (180000 own), Vanish 1856 (category 39, 180000 category),
+    // Stoneform 20594 and Will of the Forsaken 7744 (120000 own; both carry GCD category 133 but
+    // `startRecoveryTime` 0, so they tripped the second half of the same gate).
+    if (legs !== 'recovery' && cast.startRecoveryCategory !== 0 && cast.startRecoveryTimeMs > 0) {
+      for (const known of this.known) {
+        const row = spellData.spell(known);
+        if (row === null || row.startRecoveryCategory !== cast.startRecoveryCategory) {
+          continue;
+        }
+        // `fromGcd` -- this is the entry a cancelled cast gives back. See `clearGlobalCooldown`.
+        if (this.setCooldown(known, cast.startRecoveryTimeMs, at, true, 'gcd')) {
+          changed = true;
+        }
       }
     }
-    // The cast spell's OWN cooldown, from the DBC, for the same reason: the server does not send a packet
-    // for a cooldown the client can derive from its own tables.
-    if (cast.recoveryTimeMs > 0 && this.setCooldown(spellId, cast.recoveryTimeMs, at)) {
+
+    // ── (2) THE SPELL'S OWN COOLDOWN, from the DBC: the server does not send a packet for a cooldown
+    // the client can derive from its own tables. NOT `fromGcd`: a real cooldown survives a cancel.
+    if (legs !== 'gcd'
+      && cast.recoveryTimeMs > 0
+      && this.setCooldown(spellId, cast.recoveryTimeMs, at, false, 'own')) {
       changed = true;
     }
-    if (cast.categoryRecoveryTimeMs > 0 && cast.category !== 0) {
+
+    // ── (3) THE CATEGORY COOLDOWN -- a genuinely SEPARATE mechanism, and implemented rather than
+    // folded into (2). A `Category` groups a family that shares one cooldown: the racial trinket
+    // family, potions, the Vanish/Preparation group. It is the leg that matters most for the owner's
+    // report, because Every Man for Himself carries its whole 2 minutes HERE and nothing in
+    // `recoveryTime` at all -- so a fix that only reached (2) would have looked right on Blood Fury
+    // and still shown nothing on the spell he actually pressed.
+    //
+    // NAMED LIMIT: the family is resolved over `this.known`, i.e. spells the character knows. A shared
+    // cooldown that also covers ITEMS (a potion category shared with a trinket) is not applied to the
+    // item, because this client has no item-cooldown surface at all -- `GetItemCooldown` is absent.
+    // So the racial's own button dims and a category-mate item's would not.
+    if (legs !== 'gcd' && cast.categoryRecoveryTimeMs > 0 && cast.category !== 0) {
       for (const known of this.known) {
         const row = spellData.spell(known);
         if (row === null || row.category !== cast.category) {
           continue;
         }
-        if (this.setCooldown(known, cast.categoryRecoveryTimeMs, at)) {
+        if (this.setCooldown(known, cast.categoryRecoveryTimeMs, at, false, 'category')) {
           changed = true;
         }
       }
@@ -612,14 +964,22 @@ export class SpellHandler extends EventEmitter {
     gp.index = gp.headerSize;
     const bodySize = gp.length - gp.headerSize;
     const guid = gp.readGUID();
-    gp.readUnsignedByte();
+    /**
+     * **THE FLAGS BYTE WAS READ AND THROWN AWAY, and it is the one unexplained field on this
+     * packet.** Nothing here claims to know what it means -- no source in this repo names it and
+     * the reference has no 3.3.5a twin of this opcode -- but it is now RECORDED, because it is the
+     * only field that could distinguish one kind of cooldown list from another and a capture that
+     * discards it cannot answer that question at all. Read, kept, and named as unexplained rather
+     * than either guessed at or silently dropped.
+     */
+    const flags = gp.readUnsignedByte();
     let changed = false;
     const pairs: Array<[number, number]> = [];
     while (gp.available >= 8) {
       const spellId = gp.readUnsignedInt();
       const ms = gp.readUnsignedInt();
       pairs.push([spellId, ms]);
-      if (this.setCooldown(spellId, ms)) {
+      if (this.setCooldown(spellId, ms, gameTime(), false, 'wire-list')) {
         changed = true;
       }
     }
@@ -630,8 +990,13 @@ export class SpellHandler extends EventEmitter {
       caster: String(guid),
       detail: {
         count: pairs.length,
-        firstSpell: pairs[0]?.[0] ?? null,
-        firstMs: pairs[0]?.[1] ?? null,
+        flags,
+        // **ALL THE PAIRS, not just the first.** The row used to keep `firstSpell`/`firstMs` only,
+        // so a list that included the spell the owner pressed was indistinguishable from one that
+        // did not -- which is exactly the question a "why is there a cooldown here" report asks.
+        // Capped so one enormous list cannot swamp the ring; the count above is always exact.
+        pairs: pairs.slice(0, 24).map(([id, ms]) => `${id}:${ms}`).join(" "),
+        truncated: pairs.length > 24 ? 1 : 0,
       },
       bodySize,
       consumed: gp.index - gp.headerSize,
@@ -645,7 +1010,15 @@ export class SpellHandler extends EventEmitter {
    * `SMSG_COOLDOWN_EVENT` (0x135): one spell's cooldown STARTED, with no duration in the packet.
    *
    * 3.3.5a body: `u32 spellId`, `u64 guid`. The duration is the client's own to look up, which is why
-   * `Spell.dbc`'s `RecoveryTime` is read here rather than waited for on the wire.
+   * `Spell.dbc` is read here rather than waited for on the wire.
+   *
+   * **AND IT READS BOTH COOLDOWN COLUMNS, not just `RecoveryTime`.** It used to take
+   * `recoveryTimeMs` alone, which is 0 for every spell whose cooldown lives in its CATEGORY -- so an
+   * explicit server-sent cooldown event for Every Man for Himself (0 own, 120000 category) applied
+   * nothing at all. The same blind spot as the early return in `applyCastCooldowns`, in a second
+   * place, and it would have kept the owner's symptom alive on the packet path after the DBC path was
+   * fixed. The LONGER of the two is taken, and the category leg is applied across the family exactly
+   * as `applyCastCooldowns` leg (3) does.
    */
   private handleCooldownEvent(gp: GamePacket): void {
     gp.index = gp.headerSize;
@@ -653,17 +1026,38 @@ export class SpellHandler extends EventEmitter {
     const spellId = gp.readUnsignedInt();
     const guid = gp.readGUID();
     const row = spellData.spell(spellId);
-    const ms = row?.recoveryTimeMs ?? 0;
+    const own = row?.recoveryTimeMs ?? 0;
+    const category = row?.categoryRecoveryTimeMs ?? 0;
+    const ms = Math.max(own, category);
     spellWire.record({
       at: Date.now(),
       kind: 'COOLDOWN_EVENT',
       spellId,
       caster: String(guid),
-      detail: { recoveryTimeMs: ms, name: row?.name ?? null },
+      detail: {
+        recoveryTimeMs: own, categoryRecoveryTimeMs: category, appliedMs: ms, name: row?.name ?? null,
+      },
       bodySize,
       consumed: gp.index - gp.headerSize,
     });
-    if (ms > 0 && this.setCooldown(spellId, ms)) {
+    if (ms <= 0) {
+      return;
+    }
+    const at = gameTime();
+    let changed = this.setCooldown(spellId, ms, at, false, 'wire-event-own');
+    // The category family, when this spell has one -- the same separate mechanism leg (3) applies.
+    if (category > 0 && row !== null && row.category !== 0) {
+      for (const known of this.known) {
+        const other = spellData.spell(known);
+        if (other === null || other.category !== row.category) {
+          continue;
+        }
+        if (this.setCooldown(known, category, at, false, 'wire-event-category')) {
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
       this.announceCooldowns();
     }
   }
@@ -712,15 +1106,82 @@ export class SpellHandler extends EventEmitter {
       }
     }
 
+    /**
+     * **THE LOGIN COOLDOWN BLOCK -- now decoded and APPLIED, and its stride widened from 14 to 16.**
+     *
+     * It used to be skipped (`gp.read(14)` per entry, "nothing consumes them yet"), so a character
+     * who relogged with a cooldown running showed none: the server states it exactly once, here, and
+     * nothing read it. That is the other half of the owner's cooldown report -- the live packets cover
+     * a cooldown that STARTS while you are online, and only this covers one already running.
+     *
+     * **THE 14 WAS THE 1.12 WIDTH AND IT IS THE WIDTH TRAP, caught by reading rather than by a
+     * failure.** 1.12's entry is `u16 spellId, u16 itemId, u16 category, u32 cooldown,
+     * u32 categoryCooldown` = 14; 3.3.5a widens the id to `u32`, giving **16**. That is the SAME
+     * widening this file's own header already records for the spell entries in this very packet
+     * ("3.3.5a widens the id to `u32`, giving 6-byte entries") -- applied to one block of the packet
+     * and not the other. A `u16` id in one block and a `u32` id in the next, in one server write, is
+     * not a shape any implementation has.
+     *
+     * **AND THE ARITHMETIC THAT PINNED THIS PACKET CANNOT DISCRIMINATE IT**, which is exactly why it
+     * survived: the header's proof is `1 + 2 + 6n + 2 + 14m = 329` solved with **m = 0**, so the
+     * stride was multiplied by zero and never tested. A fresh character has no cooldowns, so every
+     * capture this client has seen exercises this block not at all.
+     *
+     * So: **self-consistent, NOT residual-verified.** No body with `m > 0` has been through it. The
+     * diagnostic below is written to NAME the error rather than only report one, per `CLAUDE.md`:
+     * this block is the packet's TAIL, so a wrong stride leaves a remainder, and dividing that
+     * remainder by the wire's own count localises it --
+     *
+     *   - `perEntry` a whole number: the error is INSIDE the entry and that is its size in bytes.
+     *     A `u16` id read where a `u32` sits is exactly `+2`, which is the mistake this fixes, so a
+     *     future reading of 14 would report `perEntry 2` and name itself.
+     *   - `perEntry` null with a nonzero remainder: the stride is right and the HEADER moved.
+     *   - a stride too LARGE would normally show as a throw, and `CLAUDE.md` asks for that third
+     *     arm -- but it is UNREACHABLE here and that is by construction rather than by luck: the
+     *     loop is bounded by `gp.available >= COOLDOWN_ENTRY` as well as by the wire count, so it
+     *     stops short rather than over-reading. An over-large stride therefore reports as
+     *     `cooldownsRead` BELOW `cooldownCount` with a nonzero residual, which is the same
+     *     information without the exception. Said plainly rather than leaving a reader to wonder
+     *     where the throw arm went.
+     */
     let cooldownCount = 0;
+    const COOLDOWN_ENTRY = 16;
+    let cooldownsRead = 0;
     if (gp.available >= 2) {
       cooldownCount = gp.readUnsignedShort();
-      // Read past the cooldown blocks to make `consumed` meaningful. Nothing consumes them yet: a live
-      // cooldown sweep is deferred, and `methods/cooldown.ts` explains why nothing is drawn.
-      for (let i = 0; i < cooldownCount && gp.available >= 14; i += 1) {
-        gp.read(14);
+      const at = gameTime();
+      for (let i = 0; i < cooldownCount && gp.available >= COOLDOWN_ENTRY; i += 1) {
+        const spellId = gp.readUnsignedInt() >>> 0;
+        gp.readUnsignedShort(); // itemId -- the item that granted it; no item-cooldown surface here
+        const category = gp.readUnsignedShort();
+        const ownMs = gp.readUnsignedInt() >>> 0;
+        const categoryMs = gp.readUnsignedInt() >>> 0;
+        cooldownsRead += 1;
+        // REMAINING milliseconds, not total: the server is describing a cooldown already under way,
+        // so this is exactly what `setCooldown` wants and no elapsed time is subtracted.
+        const ms = Math.max(ownMs, categoryMs);
+        if (spellId !== 0 && ms > 0) {
+          // NOT `fromGcd`: a cooldown that survived a relog is a real one, and a later cancelled cast
+          // must not refund it.
+          this.setCooldown(spellId, ms, at, false, 'login');
+        }
+        // NAMED LIMIT, and it is a limit of WHERE this runs rather than of the decode: the category
+        // cooldown is applied to the spell the packet NAMES and is not expanded across its family.
+        // It cannot be expanded here -- `Spell.dbc` is deliberately not loaded at login (the note
+        // below measures why: fetching 49 MB in the login burst starved the FrameXML manifest for
+        // over 240 s), so there is no table to resolve a category against. In practice the server
+        // sends one entry per spell that has a cooldown running, so a family whose members are all on
+        // cooldown is all named; a member the server omits keeps an undimmed button until the next
+        // live packet. `category` is read rather than skipped so the entry closes and so the value is
+        // in the wire record.
+        void category;
       }
     }
+    const cooldownResidual = bodySize - (gp.index - gp.headerSize);
+    const cooldownPerEntry = cooldownsRead > 0 && cooldownResidual !== 0
+      && cooldownResidual % cooldownsRead === 0
+      ? cooldownResidual / cooldownsRead
+      : null;
 
     this.known = new Set(found);
     spellWire.record({
@@ -728,7 +1189,17 @@ export class SpellHandler extends EventEmitter {
       kind: 'INITIAL_SPELLS',
       spellId: 0,
       caster: null,
-      detail: { spellCount, decoded: found.length, cooldownCount, first: found[0] ?? null },
+      detail: {
+        spellCount,
+        decoded: found.length,
+        cooldownCount,
+        cooldownsRead,
+        cooldownEntryBytes: COOLDOWN_ENTRY,
+        // See the cooldown block above: these two are the diagnostic that NAMES a wrong stride.
+        cooldownResidual,
+        cooldownPerEntry,
+        first: found[0] ?? null,
+      },
       bodySize,
       consumed: gp.index - gp.headerSize,
     });
@@ -819,9 +1290,44 @@ export class SpellHandler extends EventEmitter {
     // twice and the second stamp -- being later -- would win and double the GCD.
     if (decoded.caster === this.game.world.player?.guid) {
       this.castStarted.add(decoded.spellId);
-      if (this.applyGlobalCooldown(decoded.spellId)) {
+      /**
+       * **`'gcd'` ONLY, and this is the owner's Raptor Strike defect.**
+       *
+       * "Все еще гкд начинается сразу, даже если нажал способность в середине свинга. Тестирую на
+       * raptor strike."
+       *
+       * This call used to apply ALL THREE legs at START. Raptor Strike 2973 is on-next-swing with
+       * `category` 40 and `categoryRecoveryTime` **6000** and no GCD at all
+       * (`startRecoveryCategory` 0), so the server's START -- which arrives at the PRESS, because
+       * the server accepts the cast immediately and only its LANDING waits for the swing -- ran
+       * leg (3) and started the 6 s there. That is why it began at once, and why pressing mid-swing
+       * changed nothing: the stamp was keyed to the press, never to the swing.
+       *
+       * **THE PREVIOUS ROUND'S ASSUMPTION WAS THE DEFECT, not its data.** Its commit asserted "an
+       * on-next-swing spell sends no `SMSG_SPELL_START`, so it reaches the instant-cast arm at GO
+       * exactly as an instant does". The measurement behind it -- that the class is off-GCD by data
+       * -- was correct and is still correct; what was never checked is which handler actually runs,
+       * and START does.
+       *
+       * The split is the reference's and it is byte-verified on both sides -- see `CooldownLegs`.
+       * Only the GCD is armed before the launch; `RecoveryTime` and the category land at GO
+       * receive-time. So this is not a delay invented to make the sweep start later: it is the
+       * cooldown being applied on the edge the real client applies it on, and the edge is the
+       * server's own GO.
+       *
+       * **THIS IS NOT SPECIFIC TO ONE SPELL.** Every timed cast with a cooldown of its own was
+       * starting it at the press instead of at completion, so it read as ready that much early --
+       * a 2 s cast with a 6 s cooldown was short by the whole 2 s. Raptor Strike is simply the case
+       * where the whole cooldown is the category leg and the press-to-landing gap is a swing rather
+       * than a cast bar, which is what made it visible.
+       */
+      if (this.applyCastCooldowns(decoded.spellId, 'gcd')) {
         this.announceCooldowns();
       }
+      // The in-flight guard was armed at SEND with a generous provisional window; START is the first
+      // moment the real cast length is known, so tighten to it. `castTimeMs` is the server's own value
+      // with haste and auras already folded in. Only for our own cast: a peer's START is not our guard.
+      this.pendingCast.refine(decoded.castTimeMs, Date.now());
     }
 
     // THE HELD CAST POSE. This is the half that was missing, and it is why the owner saw "no animation
@@ -854,6 +1360,14 @@ export class SpellHandler extends EventEmitter {
         // RECORDED so a later failure can tell this pose from any other latch -- see `castPose`.
         this.castPose.set(decoded.caster, { spellId: decoded.spellId, animId: pose });
       }
+      // THE PRECAST KIT'S EMITTER MODELS, beside the pose because they are the same stage of the same
+      // edge: `precastKitID`'s pose is one column of the kit and its effect slots are eleven more.
+      // PERSISTENT -- a held pose and a held glow have the same lifetime, and the kit lives until its
+      // spell-id-keyed reap at GO (`spell_fx/mod.rs:15-19`). `world/spell-kit-effects.ts` owns the rest.
+      const precastKit = spellData.precastKit(decoded.spellId);
+      if (precastKit !== null) {
+        this.game.world.playSpellKit(caster, decoded.spellId, precastKit, true);
+      }
     }
 
     this.emit('spellStart', decoded);
@@ -881,6 +1395,27 @@ export class SpellHandler extends EventEmitter {
     //
     // The caster may be a peer as easily as ourselves, so this is the same plain `entities` lookup the
     // swing and the defense reaction use in `combat.ts`.
+    // THE TAIL, decoded before anything reads it. `readCastHead` has already validated the cursor.
+    const targets = this.readSpellGoTargets(gp);
+    // RECORDED for every GO, because the missile lane depends entirely on this and the decode has
+    // never been checked against captured traffic. One live cast now says what the wire carried:
+    // a plausible mask with a hit count is a working decode, an implausible one names the defect.
+    spellWire.record({
+      at: Date.now(),
+      kind: 'SPELL_GO',
+      spellId: decoded.spellId,
+      caster: decoded.caster,
+      detail: {
+        tailPlausible: targets.plausible ? 1 : 0,
+        targetMask: targets.targetMask,
+        hits: targets.hits.length,
+        misses: targets.misses.length,
+        hasDest: targets.dest === null ? 0 : 1,
+      },
+      bodySize: gp.length - gp.headerSize,
+      consumed: gp.index - gp.headerSize,
+    });
+
     const unit = this.game.world.entities.get(decoded.caster);
     if (unit) {
       const anim = castAnimationFor(unit, decoded.spellId);
@@ -898,6 +1433,67 @@ export class SpellHandler extends EventEmitter {
       }
       // The release clip re-latched `externalSeq` onto itself, so the pose record is spent either way.
       this.castPose.delete(decoded.caster);
+
+      // THE KIT HAND-OVER, the same shape as the pose's above: the precast kit is reaped and the cast
+      // kit armed. Reap FIRST so a persistent precast glow dies before the release flash appears --
+      // the reference's own emission order (`spell_fx/mod.rs:657-660`, "a GO's reap-then-begin lands
+      // in emission order, so the precast dies before the release flash").
+      //
+      // The cast kit is NOT persistent: it self-terminates after one pass of its model's sequence 0.
+      //
+      // The IMPACT kit is absent on purpose and is not a silent gap -- it plays on the TARGETS, and
+      // this packet's hit list is exactly the tail this method says it does not decode. Named in
+      // `world/spell-kit-effects.ts`, which cannot reach it either.
+      this.game.world.spellKitEffects.reap(decoded.caster, decoded.spellId);
+      const castKit = spellData.castKit(decoded.spellId);
+      if (castKit !== null) {
+        this.game.world.playSpellKit(unit, decoded.spellId, castKit, false);
+      }
+
+      // THE PROJECTILE -- the owner's "основная вещь", and the one thing this subsystem was missing.
+      // Gated on `Spell.dbc` Speed inside `SpellMissiles#launch`, which is the reference's whole spawn
+      // test. The IMPACT kit now rides its arrival rather than being unreachable: both halves came from
+      // decoding the target tail above, which is why one decode closed two gaps.
+      //
+      // Guarded on the tail being trustworthy. A `plausible` false means the stride check failed, and
+      // flying projectiles at guids read out of a mis-strided body would put fireballs at random units.
+      if (targets.plausible) {
+        this.game.world.launchSpellMissiles(
+          unit,
+          decoded.spellId,
+          targets.hits,
+          targets.misses.map((m) => m.guid),
+          targets.dest,
+        );
+        // A SPELL WITH NO PROJECTILE STILL HAS AN IMPACT STAGE, and it had no way to reach it.
+        //
+        // `playImpactKit` is wired into exactly one caller: the missile lane's arrival callback
+        // (`world/index.ts:1320`). `SpellMissiles#launch` refuses a spell whose `Spell.dbc` Speed is
+        // 0 -- correctly, there is no projectile to fly -- and returns at its `speedless` guard. So
+        // for every instant self-buff the impact kit was unreachable, silently.
+        //
+        // MEASURED on the owner's report ("должен быть такой щит над головой, и потом пропасть, но
+        // такого нет"): Demon Skin 687 -> `SpellVisual` 130 -> **impact kit 227, head slot, tag 0x14
+        // = `DemonArmor_Impact_Head.mdx`** -- the shield over the head, and the ONLY slot in the whole
+        // chain that carries it. Its precast kit 217 and cast kit 218 carry hand art only, its state
+        // kit is 0, and Speed is 0.00. Every rank shares visual 130, and `Demon Armor` and `Fel Armor`
+        // do too. So the entire visual he is missing lives in the one stage nothing could play.
+        //
+        // Inside the `plausible` gate deliberately: these are guids off the same decoded tail the
+        // missile lane refuses to trust when its stride check fails, and playing a kit on a
+        // mis-strided guid would put a shield on a random unit.
+        if (!(spellData.spellSpeed(decoded.spellId) > 0)) {
+          for (const guid of targets.hits) {
+            this.game.world.playImpactKit(guid, decoded.spellId);
+          }
+        }
+      } else {
+        // NAMED, not silent. This gate is the missile lane's alone -- the kit lane never reads the
+        // tail -- and it is the first candidate for "снаряда не видно" while the hand kit IS visible.
+        // The decode is labelled self-consistent rather than residual-verified, so it failing its own
+        // stride check is a real possibility and must show up as a number rather than as an absence.
+        this.game.world.spellMissiles.noteImplausibleTail();
+      }
     }
 
     // THE GLOBAL COOLDOWN for an INSTANT spell, which is the only kind that reaches here without having
@@ -906,14 +1502,184 @@ export class SpellHandler extends EventEmitter {
     // later stamp would win and double the GCD. `world.player` is the authority on which guid is ours; a
     // peer's confirmed cast must not put a cooldown on our bar.
     if (decoded.caster === this.game.world.player?.guid) {
-      if (this.castStarted.delete(decoded.spellId)) {
-        // Timed cast: already stamped at START. Nothing to do.
-      } else if (this.applyGlobalCooldown(decoded.spellId)) {
+      // **THE RECOVERY LEGS LAND HERE AND ONLY HERE** -- `HandleSpellGo`'s self-insert, "start = the
+      // GO receive-time" (see `CooldownLegs`). `castStarted` says whether START already stamped the
+      // GCD: it did for a timed cast, so GO adds the recovery legs alone; an instant sends no START
+      // at all, so its GO is the one edge and applies both. Either way the GCD is stamped exactly
+      // once, which is what `castStarted` has always been for.
+      const stampedAtStart = this.castStarted.delete(decoded.spellId);
+      if (this.applyCastCooldowns(decoded.spellId, stampedAtStart ? 'recovery' : 'all')) {
         this.announceCooldowns();
       }
+      // The cast RESOLVED -- open the in-flight guard so the next press goes out. Spell-id-keyed, which
+      // is what stops a triggered proc's GO (a different spell, arriving mid-cast) opening it early.
+      this.pendingCast.clearIf(decoded.spellId);
+      /**
+       * **AND THE MELEE QUEUE, because for an on-next-swing strike THIS GO *IS* THE LANDING.**
+       *
+       * The owner: "дальше после свинга произойдет удар и начнется кд." The server holds the strike
+       * in its `CURRENT_MELEE_SPELL` slot and sends `SMSG_SPELL_GO` when its own swing timer fires
+       * it -- so GO arrives at the moment the blow lands, not at the press.
+       *
+       * **WHICH MEANS THE COOLDOWN ALREADY STARTS AT THE LANDING AND NEEDED NO NEW GATE.** The
+       * `applyCastCooldowns` call a few lines above is the instant-cast arm, and an on-next-swing
+       * spell reaches it here for exactly the reason an instant does: it sends no
+       * `SMSG_SPELL_START`, so `castStarted` is empty for it. The cooldown is therefore stamped at
+       * GO, which is the swing. The ordering the owner described is the ordering that falls out --
+       * verified by reading rather than assumed, and stated because a gate added "to be safe" here
+       * would have moved the cooldown to the press and broken it.
+       *
+       * The reference's own clear set is the same three edges, and it explains why GO is in it on
+       * this wire where the 1.12 client used `CAST_RESULT`: "vmangos never sends an OK `CAST_RESULT`
+       * at all, so on our wire the resolution is `SMSG_SPELL_GO` when the swing fires the strike"
+       * (`ui_cast.rs:176-183`).
+       */
+      this.clearQueuedMelee(decoded.spellId);
     }
 
-    this.emit('spellGo', decoded);
+    this.emit('spellGo', { ...decoded, targets });
+  }
+
+
+  /**
+   * `SMSG_SPELL_GO`'s TARGET TAIL -- the hit list, the miss list and the ground point.
+   *
+   * This is the tail this method said for four rounds it deliberately did not decode. It is decoded
+   * now because ONE decode closes TWO gaps: the missile needs a destination and the impact kit needs
+   * to know whose body to play on, and both are in this block.
+   *
+   * ## The layout, and the two width deltas that are already handled upstream
+   *
+   * **The layout is the SERVER IMPLEMENTATIONS' shape, not measured off a capture** -- the same
+   * standing this file's `CMSG_CANCEL_CAST` and `CMSG_SET_ACTION_BUTTON` notes take. It is
+   * TrinityCore's `Spell::WriteSpellGoTargets` followed by `SpellCastTargets::Write`, and it is
+   * labelled rather than asserted because nothing available from here can observe the difference.
+   * What IS measured is the cursor it starts from: `readCastHead`'s own live-wire measurement (the
+   * `1500`/`2` reading recorded on it) pins where this block begins.
+   *
+   * Read from immediately after `readCastHead`, which has consumed the two guids, `castCount`,
+   * `spellId`, `castFlags` and the one `u32` timestamp:
+   *
+   *     u8  hitCount
+   *     hitCount  x  u64 guid            -- FULL eight bytes, NOT packed
+   *     u8  missCount
+   *     missCount x (u64 guid, u8 missCondition [, u8 reflectResult when condition == 11 REFLECT])
+   *     u32 targetMask                   -- `SpellCastTargets`
+   *     ... mask-dependent blocks, then castFlags-dependent blocks
+   *
+   * The two 1.12 -> 3.3.5a width deltas in this packet are `castFlags` (u16 -> u32) and the `castCount`
+   * byte that did not exist in 1.12, and BOTH are consumed by `readCastHead`, which self-checks its
+   * `spellId` precisely so a 1.12-shaped read cannot reach here. So this block inherits an already
+   * validated cursor rather than re-deriving the offset -- which is the shape that made the quest-area
+   * defect land its strings 8 bytes early.
+   *
+   * The guids here are NOT packed, and that is the trap worth naming: every other guid in this file is
+   * packed, so reusing `readPackedGUID` would read one byte where eight sit and walk the rest of the
+   * body off by seven per target.
+   *
+   * ## SELF-CONSISTENT, NOT RESIDUAL-VERIFIED, and the difference is stated on purpose
+   *
+   * `CLAUDE.md` is explicit that only a residual against captured traffic settles a layout, and no
+   * capture is available from here -- so this says "self-consistent" as instructed. What it DOES have
+   * is an oracle that costs nothing and is not self-built: after the two lists, the next word must be
+   * a `SpellCastTargets` mask, i.e. a small bitmask drawn from known flags. A wrong stride in either
+   * list lands a guid word or a garbage count there instead, and `MASK_PLAUSIBLE` catches it. That is
+   * the same trick `readCastHead` uses on `spellId`, and it is reported through `spellWire` rather
+   * than thrown, so a bad read shows up as a named record instead of a missing missile.
+   *
+   * The remainder is NOT asserted to be zero, deliberately: the mask-dependent and castFlags-dependent
+   * blocks that follow are not consumed here (each is its own width risk and nothing needs them), so a
+   * non-zero remainder is expected and is recorded as `left` rather than treated as an error.
+   */
+  private readSpellGoTargets(gp: GamePacket): SpellGoTargets {
+    // `TARGET_FLAG_*`, the bits this build's `SpellCastTargets::Read` knows. Used only as the
+    // plausibility oracle above and to decide whether a ground point follows.
+    const TARGET_FLAG_UNIT = 0x0002;
+    const TARGET_FLAG_ITEM = 0x0010;
+    const TARGET_FLAG_SOURCE_LOCATION = 0x0020;
+    const TARGET_FLAG_DEST_LOCATION = 0x0040;
+    const TARGET_FLAG_STRING = 0x2000;
+    const TARGET_FLAG_GAMEOBJECT = 0x0800;
+    const TARGET_FLAG_CORPSE_ALLY = 0x8000;
+    const MASK_KNOWN = 0xffff;
+    /** `SPELL_MISS_REFLECT`, the one miss condition that carries a second byte. */
+    const MISS_REFLECT = 11;
+
+    const hits: string[] = [];
+    const misses: Array<{ guid: string; condition: number }> = [];
+    let targetMask = 0;
+    let dest: { x: number; y: number; z: number } | null = null;
+    let plausible = false;
+
+    try {
+      const hitCount = gp.readUnsignedByte();
+      for (let i = 0; i < hitCount; i += 1) {
+        hits.push(this.readFullGuid(gp));
+      }
+      const missCount = gp.readUnsignedByte();
+      for (let i = 0; i < missCount; i += 1) {
+        const guid = this.readFullGuid(gp);
+        const condition = gp.readUnsignedByte();
+        if (condition === MISS_REFLECT) {
+          gp.readUnsignedByte();
+        }
+        misses.push({ guid, condition });
+      }
+      targetMask = gp.readUnsignedInt();
+      // THE ORACLE. A real mask uses only the low bits this build defines; a stride error puts a guid
+      // word or a count here, which overwhelmingly fails this.
+      plausible = (targetMask & ~MASK_KNOWN) === 0;
+
+      if (plausible) {
+        // Only the blocks needed to find a GROUND point are walked, in `SpellCastTargets::Read` order.
+        if ((targetMask & (TARGET_FLAG_UNIT | TARGET_FLAG_CORPSE_ALLY | TARGET_FLAG_GAMEOBJECT)) !== 0) {
+          gp.readPackedGUID();
+        }
+        if ((targetMask & TARGET_FLAG_ITEM) !== 0) {
+          gp.readPackedGUID();
+        }
+        if ((targetMask & TARGET_FLAG_SOURCE_LOCATION) !== 0) {
+          gp.readPackedGUID();
+          gp.readFloat();
+          gp.readFloat();
+          gp.readFloat();
+        }
+        if ((targetMask & TARGET_FLAG_DEST_LOCATION) !== 0) {
+          gp.readPackedGUID();
+          const x = gp.readFloat();
+          const y = gp.readFloat();
+          const z = gp.readFloat();
+          dest = { x, y, z };
+        }
+        // `TARGET_FLAG_STRING`'s cstring is deliberately NOT consumed: nothing needs it and a
+        // cstring read is its own width risk. It is the last block in `SpellCastTargets`, so skipping
+        // it costs nothing here -- everything this method returns has already been read.
+      }
+    } catch (error) {
+      // A short body is a real outcome (a truncated packet, or a stride wrong enough to over-read).
+      // Recorded, never thrown: the caller degrades to "no targets" and the cast still animates.
+      spellWire.record({
+        at: Date.now(),
+        kind: 'SPELL_GO',
+        spellId: 0,
+        caster: null,
+        detail: { targetsError: String(error), hits: hits.length, misses: misses.length },
+        bodySize: gp.length - gp.headerSize,
+        consumed: gp.index - gp.headerSize,
+      });
+      return { hits, misses, targetMask, dest, plausible: false };
+    }
+
+    return { hits, misses, targetMask, dest, plausible };
+  }
+
+  /** Eight little-endian bytes -> the normalised guid string. See `guid-hex.ts` for why not a Number. */
+  private readFullGuid(gp: GamePacket): string {
+    const bytes = new Uint8Array(GUID_BYTES);
+    for (let i = 0; i < GUID_BYTES; ++i) {
+      bytes[i] = gp.readUnsignedByte();
+    }
+    return guidHex(bytes);
   }
 
   /**
@@ -1040,6 +1806,16 @@ export class SpellHandler extends EventEmitter {
     // Same reason as in `handleSpellFailure`: a refused cast never reaches GO, so its id must not be left
     // in `castStarted` to suppress a later instant's global cooldown.
     this.castStarted.delete(spellId);
+    // The queue's other failure edge -- the reference clears on a failing `CAST_RESULT` too
+    // (`ui_cast.rs:176-183`); on this wire `SMSG_CAST_FAILED` is that packet.
+    this.clearQueuedMelee(spellId);
+    // AND THE GCD GOES BACK. This is the reference's own trigger, named exactly: the GCD is armed at
+    // send and "a later `SMSG_CAST_RESULT` failure clears it again (`0x6e1630`)"
+    // (`ui_action/cast_send.rs:643-647`) -- `SMSG_CAST_FAILED` is 3.3.5a's name for that packet.
+    // Ordinarily a no-op, because a refused cast usually got no START and so stamped no GCD; the case
+    // it covers is a cast that STARTED and was then refused, which is also the only case the pose
+    // release below covers.
+    this.clearGlobalCooldown();
     // `SMSG_CAST_FAILED`'s body names no caster -- the server only refuses OUR casts -- so the pose to
     // release is the player's. Ordinarily there is none to release: a refused cast gets no START either,
     // so no pose was ever armed. The case this covers is a cast that STARTED and was then refused.
@@ -1047,6 +1823,11 @@ export class SpellHandler extends EventEmitter {
     if (self !== undefined) {
       this.releaseCastPose(self, spellId);
     }
+    // Open the guard. `clearIf` is spell-id-keyed, so a refusal naming a spell that is NOT the one in
+    // flight leaves the guard alone -- which is the correct answer now that the send path refuses a
+    // duplicate locally: any `SMSG_CAST_FAILED` that still names a different spell came from a route
+    // that does not go through the guard (an item use, a server-initiated refusal), and must not open it.
+    this.pendingCast.clearIf(spellId);
     this.emit('castFailed', { spellId, result });
   }
 
@@ -1116,15 +1897,114 @@ export class SpellHandler extends EventEmitter {
     });
   }
 
-  castSpell(spellId: number, target: string | null): void {
+  /**
+   * THE IN-FLIGHT REFUSAL, and the reason `castSpell` now has a return value.
+   *
+   * `'sent'` the packet went out. `'busy-same'` the same spell is already casting -- the real client
+   * bails SILENTLY here (`6e4d43`), so the caller must show nothing. `'busy-other'` a different spell is
+   * casting -- the real client shows its own red line, reason 0x61 "Another action is in progress"
+   * (`6e4d97`), and still sends nothing.
+   *
+   * Both arms are `samples/benilla/crates/benilla-app/src/ui_action/cast_send.rs:283-297`. Neither sends
+   * a packet, which is the entire fix: see `game/classes/pending-cast.ts`.
+   */
+  /**
+   * **THE TARGET IS NOW RESOLVED, NOT COPIED** -- see `game/classes/cast-target.ts`.
+   *
+   * This used to ship the current selection whenever there was one, for every spell. That is the
+   * owner's "не могу кастовать дружественные заклинания, типа хил, пока в таргете противник": with a
+   * wolf selected, a heal went out aimed at the wolf and a self-buff went out aimed at the wolf, and
+   * the server refused both. The real client resolves the target locally first, and the two arms that
+   * matter are a `Targets` word of ZERO (ship `TARGET_FLAG_SELF` and no guid) and the autoSelfCast
+   * fallback to the player. `cast-target.ts` carries the mechanism, its citations and the DBC
+   * measurement that establishes which column decides.
+   *
+   * **NO WIRE SHAPE CHANGES HERE, and that is what keeps the width trap out of this fix.** Both
+   * bodies this can now send are bodies this method already sent: `TARGET_FLAG_UNIT` + a packed guid
+   * (what a targeted press sent), and `TARGET_FLAG_SELF` with nothing following (what a press with no
+   * selection sent). The resolution only chooses BETWEEN them, so there is no new length, no new
+   * field and nothing to widen -- and the exact sizing below is unchanged.
+   *
+   * `autoSelfCast` is passed in rather than read here because the CVar store lives on the Lua side;
+   * `ui/cast-refusal.ts` reads it and it is the ONE door, so there is one reader.
+   */
+  castSpell(
+    spellId: number,
+    target: string | null,
+    autoSelfCast: boolean,
+  ): 'sent' | 'busy-same' | 'busy-other' | 'no-target' | 'invalid-target' {
     const TARGET_FLAG_SELF = 0x0000;
     const TARGET_FLAG_UNIT = 0x0002;
+
+    // THE GUARD, ahead of everything. A duplicate press must not reach the wire: the server would refuse
+    // it with `SPELL_FAILED_SPELL_IN_PROGRESS` and that refusal used to close the RUNNING cast's bar.
+    const now = Date.now();
+    /**
+     * **THE ON-NEXT-SWING CLASS FORKS HERE, and it is the whole of the second defect.**
+     *
+     * `Attributes & 0x404` -- both bits measured on this build, in
+     * `classes/auto-attack-start.ts#isOnNextSwing`. Such a spell does not cast: it queues on the
+     * server's melee slot and lands on the next swing.
+     *
+     * **RE-PRESSING A QUEUED STRIKE IS A SILENT BAIL, NOT A CANCEL -- checked against the reference
+     * rather than assumed, because the brief said the opposite.** The reference is explicit and
+     * §5-CONFIRMED: "Re-pressing the queued spell itself is the ref's silent same-spell bail
+     * (`6e4d43`: debug-log, `xor al,al`, no CMSG, no error): **1.12 has no re-press-to-unqueue**"
+     * (`ui_cast.rs:184-187`, same fork at `ui_action/cast_send.rs:281-283`). So `'busy-same'` is
+     * returned, which `ui/cast-refusal.ts` already renders as nothing at all -- no packet, no red
+     * line. The real un-queue is the StopAttack chain, never a re-press.
+     */
+    const onNextSwing = isOnNextSwing(spellData.spell(spellId));
+    if (onNextSwing && this.queuedMelee === spellId) {
+      return 'busy-same';
+    }
+    // The guard now only ever holds ORDINARY casts, which is what lets a queued strike stop blocking
+    // them; `pendingCast` is armed below on the non-on-next-swing branch only.
+    const inFlight = this.pendingCast.current(now);
+    if (inFlight !== null) {
+      return inFlight === spellId ? 'busy-same' : 'busy-other';
+    }
+
+    const world = this.game.world;
+    const selfGuid = world?.player?.guid ?? null;
+    const selection = target !== null && target !== '0x0' ? target : null;
+    const wire = resolveCastTarget(
+      spellData.spell(spellId),
+      selection,
+      selfGuid,
+      autoSelfCast,
+      {
+        target: selection === null ? null : world?.entities?.get(selection) ?? null,
+        self: selfGuid === null ? null : world?.entities?.get(selfGuid) ?? world?.player ?? null,
+      },
+    );
+    if (wire.kind === 'refused') {
+      // REFUSED LOCALLY AND NOT SENT, which is the reference's own behaviour for a word it cannot
+      // bind. Recorded so a probe can see which word was refused rather than only that a press did
+      // nothing -- the targeting-cursor families (Flamestrike, Blizzard, Mining, Opening) all land
+      // here and `cast-target.ts` names that gap.
+      spellWire.record({
+        at: Date.now(),
+        kind: 'CAST_REFUSED',
+        spellId,
+        caster: null,
+        detail: {
+          word: wire.word,
+          error: wire.error,
+          selection,
+          name: spellData.spell(spellId)?.name ?? null,
+        },
+        bodySize: 0,
+        consumed: 0,
+      });
+      return wire.error === ERR_NO_TARGET ? 'no-target' : 'invalid-target';
+    }
 
     // The body is sized exactly, because `GameHandler#send` derives the packet's declared LENGTH from
     // the buffer size -- an over-allocated buffer sends a wrong length field, which `handler.js` records
     // as a real defect it has already been bitten by.
-    const targeted = target !== null && target !== '0x0';
-    const guidBytesLength = targeted ? packedGuidLength(target as string) : 0;
+    const targeted = wire.kind === 'unit';
+    const guidBytesLength = targeted ? packedGuidLength(wire.guid) : 0;
     const body = 1 + 4 + 1 + 4 + guidBytesLength;
 
     const app = new GamePacket(GameOpcode.CMSG_CAST_SPELL, 6 + body);
@@ -1133,9 +2013,34 @@ export class SpellHandler extends EventEmitter {
     app.writeUnsignedByte(0);
     app.writeUnsignedInt(targeted ? TARGET_FLAG_UNIT : TARGET_FLAG_SELF);
     if (targeted) {
-      app.writePackedGUID(target as string);
+      app.writePackedGUID(wire.guid);
     }
     this.game.send(app);
+    // OPTIMISTIC: armed on the send, not on `SMSG_SPELL_START`, because the mashing lands during that
+    // round trip. Tightened to the server's real cast time when START names it.
+    //
+    // **EXCEPT FOR THE ON-NEXT-SWING CLASS, which arms the melee queue INSTEAD** -- the reference's
+    // own fork (`ui_action/cast_send.rs:596-600`). This CHANGES a rule
+    // `game/classes/pending-cast.ts` established -- that the guard is armed on every send -- and the
+    // change is what the reference requires: with a queued strike in the guard, pressing Rend during
+    // it was refused `'busy-other'` with a red line for up to the guard's 5 s provisional deadline,
+    // where the reference says plainly "a queued Heroic Strike never blocks Rend". `pending-cast.ts`
+    // itself is untouched; only who arms it changed.
+    //
+    // A consequence that is the reference's rule falling out rather than a coincidence: the movement
+    // self-cancel reads `currentCast()`, i.e. the guard, so a queued strike is now invisible to it --
+    // and the reference's un-queue list ends "never movement" (`ui_cast.rs:188-191`).
+    if (onNextSwing) {
+      // Replaces any prior queue, silently: the server holds ONE melee slot.
+      this.queuedMelee = spellId;
+      // **AND IT ANNOUNCES ITSELF. This is the owner's "Скил когда активирован должен вот так
+      // загораться".** Arming used to be a silent field write, so the checked state the action bar
+      // computes from `queuedMeleeSpell` was correct and never reached Lua -- the button could not
+      // light up because nothing told it to look. See `ui/action-bridge.ts#pushQueuedMelee`.
+      this.emit('queuedMeleeChanged');
+    } else {
+      this.pendingCast.arm(spellId, now);
+    }
 
     spellWire.record({
       at: Date.now(),
@@ -1143,13 +2048,67 @@ export class SpellHandler extends EventEmitter {
       spellId,
       caster: null,
       detail: {
-        target: targeted ? (target as string) : null,
+        // The RESOLVED target, and the selection it came from -- so a probe can see the fallback
+        // happen (`selection` a wolf, `target` ourselves) rather than only its result.
+        target: targeted ? wire.guid : null,
+        selection,
+        selfCast: targeted && wire.guid === selfGuid ? 1 : 0,
         name: spellData.spell(spellId)?.name ?? null,
         bodyBytes: body,
       },
       bodySize: body,
       consumed: body,
     });
+
+    /**
+     * **`TryCast`'s POST-SEND TAIL: a strike starts the melee auto-attack.**
+     *
+     * The owner: "Нужно сделать так, чтобы автоатака начиналась автоматически после первого удара."
+     *
+     * Ported from `benilla-app/src/ui_action/cast_send.rs:601-630`, which byte-verifies the whole
+     * tail against `6e51b5` (wow-re `combat-feel-law.md` §5 @ c445713b): a COMMITTED send whose spell
+     * passes `initiates_auto_attack` starts the melee auto-attack **at the cast's bound unit target,
+     * unless one is already running**. The predicate and its three bits are
+     * `classes/auto-attack-start.ts`, measured on this build rather than ported.
+     *
+     * FOUR CONDITIONS, and every one of them is the reference's rather than mine:
+     *
+     *  1. **The send was COMMITTED.** This sits after `this.game.send`, so a press refused by the
+     *     in-flight guard or by target resolution never reaches it -- both of those return earlier.
+     *     That matters: the reference's tail is reached only from a committed send.
+     *  2. **The spell's attributes say so** (`initiatesAutoAttack`). NOT "any damage", which is the
+     *     one thing this must not be: Fireball, Divine Storm, Charge and Intercept all deal damage
+     *     and none of them starts a swing in the real client.
+     *  3. **A BOUND UNIT TARGET.** The reference's `if let (Some(d), Some(guid))` -- a self-implicit
+     *     cast has no guid to swing at, so `wire.kind === 'unit'` is the same test. And it must not be
+     *     OURSELVES: a helpful spell that fell back to the caster (`cast-target.ts`' autoSelfCast
+     *     candidate) would otherwise start us swinging at our own guid.
+     *  4. **NOT ALREADY ENGAGED.** `!engaged` is the TAIL's own gate, not `StartAttack`'s, and the
+     *     reference records that the distinction cost it a wrong half (decision 1028):
+     *     `Attack 0x5ecb70`'s already-attacking test skips only the send, but TryCast's tail gates
+     *     the whole CALL (`6e51cb call 0x60ecb0; 6e51d2 jne`). So a strike pressed while already
+     *     swinging does nothing at all -- notably it does not disturb a running auto-repeat.
+     *
+     * `autoAttackOn` is the right mirror for `engaged` and not an approximation: it is driven from
+     * the SERVER's `SMSG_ATTACKSTART`/`SMSG_ATTACKSTOP` naming us (`combat.ts#handleAttackStart`),
+     * which is exactly what the reference calls "our mirror is the wire-echoed `Engaged`".
+     *
+     * **NO WIRE SHAPE IS ADDED AND NOTHING IS WIDENED.** `startAttack` already exists and already
+     * sends `CMSG_ATTACKSWING` with one FULL 8-byte guid; this only calls it. The stop half is
+     * likewise already built and server-authoritative -- see the round report for the edge list.
+     *
+     * The reference also snaps the melee sheath alongside the send (`0x6131a0` -> `0x5ecb70`). This
+     * client has no sheath state to snap: the stance comes from `inCombat`, which `combat.ts` sets
+     * from the same `SMSG_ATTACKSTART` this send provokes, so the pose follows without a second
+     * writer. Named rather than silently dropped.
+     */
+    if (targeted && wire.guid !== selfGuid && initiatesAutoAttack(spellData.spell(spellId))) {
+      const combat = this.game.objectHandler?.combatHandler;
+      if (combat !== undefined && !this.autoAttackOn) {
+        combat.startAttack(wire.guid);
+      }
+    }
+    return 'sent';
   }
 
   /**
@@ -1172,6 +2131,11 @@ export class SpellHandler extends EventEmitter {
     app.writeUnsignedInt(spellId);
     this.game.send(app);
 
+    // The cast is over as far as we are concerned, so the guard must open NOW rather than waiting for
+    // the server's echo -- otherwise Escape (or a movement cancel) would leave the guard holding and the
+    // next press would be refused as a duplicate of a cast that is already cancelled.
+    this.pendingCast.clearIf(spellId);
+
     spellWire.record({
       at: Date.now(),
       kind: 'CANCEL_SENT',
@@ -1181,6 +2145,100 @@ export class SpellHandler extends EventEmitter {
       bodySize: body,
       consumed: body,
     });
+  }
+
+  /**
+   * `CMSG_CANCEL_CHANNELLING` (0x13B): stop a CHANNEL. A different opcode from `CMSG_CANCEL_CAST` and
+   * not interchangeable with it.
+   *
+   * 3.3.5a body: `u32 spellId`. TrinityCore's `HandleCancelChanneling` reads one `uint32`; the same
+   * server-implementation standing `cancelCast` above declares. **The longer-body rule does not help
+   * here and is not applied**: there is no second word this could be, and a cancel the server rejects is
+   * silent either way.
+   *
+   * **MOVEMENT ONLY -- Escape can never reach a channel**, and that asymmetry is the reference's,
+   * verified rather than assumed: `Script::SpellStopCasting 0x6e6e80`'s callee closure never calls the
+   * channel canceller `0x6e9b70`, and its in-flight word is already 0 mid-channel because the launch
+   * result cleared it (`ui_cast.rs:366-374`). That is the vanilla "/stopcasting cannot stop a channel"
+   * quirk, and it is kept.
+   *
+   * Nothing local is torn down, which is also the reference's: `0x6e9b70` fires no event and clears no
+   * state -- the channel bar closes on the server's `SMSG_CHANNEL_UPDATE(0)`.
+   */
+  cancelChannelling(spellId: number): void {
+    const body = 4;
+    const app = new GamePacket(GameOpcode.CMSG_CANCEL_CHANNELLING, GamePacket.HEADER_SIZE_OUTGOING + body);
+    app.writeUnsignedInt(spellId);
+    this.game.send(app);
+
+    spellWire.record({
+      at: Date.now(),
+      kind: 'CANCEL_SENT',
+      spellId,
+      caster: null,
+      detail: { channelling: 1 },
+      bodySize: body,
+      consumed: body,
+    });
+  }
+
+  /**
+   * The spell id of our outstanding cast, or null -- the guard's read side.
+   *
+   * This is what the movement cancel asks (`game/ui/world-ui.ts`): it needs to know WHICH spell is in
+   * flight so it can consult that spell's own `InterruptFlags`, and it needs the answer during the
+   * send -> `SMSG_SPELL_START` window as well as after it, which the cast-bar snapshot cannot give.
+   */
+  currentCast(): number | null {
+    return this.pendingCast.current(Date.now());
+  }
+
+  /**
+   * Drop the melee queue when THIS spell resolved or died. Id-keyed, like every reap here.
+   *
+   * Returns whether it cleared, so a caller can announce rather than guess -- the discarded-return
+   * defect class this project records twice.
+   */
+  clearQueuedMelee(spellId: number): boolean {
+    if (this.queuedMelee !== spellId) {
+      return false;
+    }
+    this.queuedMelee = null;
+    // The STATE event, not the cooldown one: the queue is a checked state and
+    // `ACTIONBAR_UPDATE_COOLDOWN` never reaches `ActionButton_UpdateState`. The cooldown push is not
+    // lost by the swap -- every caller of this (`SPELL_GO`, `SMSG_CAST_FAILED`,
+    // `SMSG_SPELL_FAILURE`) announces cooldowns on its own path.
+    this.emit('queuedMeleeChanged');
+    return true;
+  }
+
+  /**
+   * The in-flight cast OR the queued strike -- the two slots re-joined for the readers that must see
+   * both.
+   *
+   * The reference keeps exactly this reader and names why it is separate from the guard
+   * (`ui_cast.rs:196-199`): "**Escape is the other route, and it is not that chain at all** (1049).
+   * In the reference a queued strike simply *is* the inflight spell, so
+   * `Script::SpellStopCasting 0x6e6e80`'s plain `IsCasting` branch cancels it like any cast ...
+   * `Inflight` is where our two slots are re-joined for that reader."
+   *
+   * So Escape cancels a queued strike and the MOVEMENT self-cancel does not -- which is the whole
+   * reason these are two readers and not one. `currentCast` above stays the guard alone.
+   */
+  inflightOrQueued(): number | null {
+    return this.pendingCast.current(Date.now()) ?? this.queuedMelee;
+  }
+
+  /**
+   * Open the in-flight guard without sending anything -- the OFFLINE world's cancel leg.
+   *
+   * `/game?offline=1` has no wire, so `cancelCast` (which opens the guard as a side effect of sending)
+   * is not called there. Without this the guard would stay armed until its 5 s provisional deadline and
+   * casting would appear to lock up after the first cancelled cast. Spell-id-keyed like every other
+   * clear, so it cannot open a guard belonging to a later cast.
+   */
+  releaseCastGuard(spellId: number): void {
+    this.pendingCast.clearIf(spellId);
   }
 
   // -- What the Lua side reads --------------------------------------------------------------------

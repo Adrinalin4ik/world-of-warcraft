@@ -62,7 +62,7 @@ import { Widget } from '../../../widget';
 import { ensureFont, notImplemented, warnOnce, widgetOf } from './region';
 import { getAction } from '../api/actions';
 import { getAuraTooltipSource, getShapeshiftTooltipSource } from '../api/auras';
-import { getSpellbook } from '../api/spells';
+import { getSpellLinkSource, getSpellbook } from '../api/spells';
 import { layoutScale, measureText } from '../../../text';
 import type { LuaVM } from '../vm';
 import { getItemTooltipSource, ItemTooltipInfo, ItemTooltipSource } from '../api/items';
@@ -323,6 +323,28 @@ function writeSide(
 ): boolean {
   const region = regionOf(ctx, self, suffix);
   if (region === null) {
+    /**
+     * **A MISSING LINE SLOT WAS THE PROJECT'S OWN FORBIDDEN FAILURE: SILENT.**
+     *
+     * `appendLine` returns 0 on this, so `state.lines` never advances, `NumLines()` answers 0 and the
+     * frame draws at its authored size with nothing in it. That is indistinguishable from "the item
+     * data has not arrived" -- which is a completely different defect with a completely different fix
+     * -- and the owner has now reported an empty tooltip three rounds running while I chased the
+     * other one.
+     *
+     * So it names the slot. `ItemRefTooltipTextLeft1` missing and `GameTooltipTextLeft1` present is a
+     * template-expansion answer; both present is a DATA answer. One line of output separates them,
+     * where five rounds of reading did not.
+     *
+     * `warnOnce` and not a `notImplemented`: this is not a gap, it is a lookup that failed, and it
+     * belongs in the report next to the other load-time facts rather than reddening `UIErrorsFrame` --
+     * every tooltip open would repeat it.
+     */
+    warnOnce(
+      `GameTooltip: ${ctx.registry.nameOf(self) ?? self}${suffix} does not exist, so this line cannot `
+      + 'be written -- the frame will draw empty. A tooltip inheriting GameTooltipTemplate should have '
+      + 'had it minted from `$parentTextLeft<n>`',
+    );
     return false;
   }
   region.text = text;
@@ -1239,7 +1261,74 @@ const ITEM_SETTERS: MethodTable = {
   },
   GetPadding: (ctx, self) => [widgetOf(ctx, self).tooltipPadding],
 
-  SetHyperlink: (ctx, self, args) => fillFromSource(ctx, self, 'link', String(args[0] ?? '')),
+  /**
+   * `SetHyperlink(link)` -- and the LINK TYPE decides which tooltip this is.
+   *
+   * The owner: item links fill, "тултипы скилов не работают". `SetItemRef` has no separate arm for a
+   * spell -- every type that is not a player, a channel or a GM link falls through to the same
+   * `ItemRefTooltip:SetHyperlink(link)` (`itemref.lua:175-183`) -- so dispatching on the type is the
+   * ENGINE's job, and this method was doing the item half of it and calling that the whole thing.
+   *
+   * `spell:<id>` goes to the DBC by id, not to the spellbook by slot: see
+   * `api/spells.ts#SpellLinkSource` for why that distinction is the feature and not a detail.
+   *
+   * AN UNKNOWN TYPE SAYS SO instead of drawing an empty frame. `quest:`, `achievement:`, `talent:`,
+   * `enchant:` and `trade:` all reach here in the real client and none is built; a frame that opens
+   * blank is the failure this project forbids, and one line in the report is the difference between
+   * "not built" and "broken".
+   */
+  SetHyperlink: (ctx, self, args) => {
+    const link = String(args[0] ?? '');
+    /**
+     * THE TYPE IS WHAT FOLLOWS `|H`, and the first version of this got it wrong on two real types.
+     *
+     * It tried to skip an optional `|cAARRGGBB` with a hex character class, and a hex class EATS THE
+     * LEADING LETTERS of a type that starts with one: measured, `enchant:1234` parsed as `nchant` and
+     * `achievement:456` as `hievement`. Both would still have taken the "not built" branch, so the
+     * behaviour was right and only the message lied -- which is exactly the kind of quiet wrongness a
+     * regex hides. Cutting at `|H` cannot do that.
+     *
+     * A link may arrive with the wrapper (`|cff...|Hspell:75|h[Shoot]|h|r`, from a Lua caller) or as
+     * the bare payload (`spell:75`, which is what `SetItemRef` passes), so both are handled.
+     */
+    const at = link.indexOf('|H');
+    const payload = at === -1 ? link : link.slice(at + 2);
+    const type = /^([a-zA-Z]+):/.exec(payload)?.[1]?.toLowerCase() ?? null;
+    if (type === 'spell') {
+      const id = Number(/^spell:(\d+)/.exec(payload)?.[1] ?? 0);
+      const row = id > 0 ? getSpellLinkSource(ctx.vm)?.(id) ?? null : null;
+      if (row === null) {
+        warnOnce(
+          `GameTooltip: no spell data for '${link}' -- Spell.dbc may not have landed yet`,
+        );
+        return [false];
+      }
+      fillSpellLines(ctx, self, row.name, row.subName, row.description);
+      return [true];
+    }
+    /**
+     * `quest:<id>:<level>` -- the title and the objectives, through the same source hook.
+     *
+     * The CONTENT is ours and has to be: the real engine composes a quest tooltip itself, so no
+     * FrameXML file states what goes in one. The title and the one-line objectives summary are what
+     * `SMSG_QUEST_QUERY_RESPONSE` gives us (`quest.ts#QuestTemplate.title`/`objectivesText`), and they
+     * are what a reader clicking the link wants to know: what the quest is and what it asks for.
+     */
+    if (type === 'quest') {
+      const id = Number(/^quest:(\d+)/.exec(payload)?.[1] ?? 0);
+      if (id > 0) {
+        return fillFromSource(ctx, self, 'questlink', id);
+      }
+    }
+    if (type !== null && type !== 'item' && type !== 'quest') {
+      warnOnce(
+        `GameTooltip:SetHyperlink: the '${type}' link type is not built, so its tooltip stays empty `
+        + '(item and spell are)',
+      );
+      return [false];
+    }
+    return fillFromSource(ctx, self, 'link', link);
+  },
   /**
    * `SetQuestItem(type, index)` -- a reward, choice or requirement row on a giver panel.
    *
@@ -1531,6 +1620,12 @@ function fillFromSource(
       pendingFills.set(ctx.vm, byFrame);
     }
     byFrame.set(self, () => fillFromSource(ctx, self, kind, a, b)[0] === true);
+    // NAMED, for the same reason the missing line slot above is: an empty tooltip has two causes and
+    // they look identical. This one says the DATA was not there; that one says the SLOT was not.
+    warnOnce(
+      `GameTooltip: no ${kind} data for '${String(a)}' yet -- the tooltip will fill when it arrives `
+      + '(see retryTooltipFills). An entry seen for the first time is always cold once.',
+    );
     return [false];
   }
   pendingFills.get(ctx.vm)?.delete(self);

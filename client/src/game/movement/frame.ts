@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 
 import { CastFn } from '../collision/collision-world';
+import { MAX_SUBSTEP_TRAVEL, MAX_SUBSTEPS } from './constants';
 import { MoveInput, Outcome, step } from './mover';
+import { notePhase } from './move-phases';
 import { PlayerMoveState } from './player-state';
 import {
   breachStep, SWIM_BACK_SPEED, SWIM_SPEED, SwimOutcome, swimStep, updateSwimming,
@@ -14,6 +16,13 @@ import {
 export interface FrameDeps {
   cast: CastFn;
   surfaceAt(feet: THREE.Vector3): number | null;
+  /**
+   * The push-out for a body that is INSIDE geometry -- see `mover.ts#step`.
+   *
+   * OPTIONAL, so a caller with no world (every movement test) and the swim paths are unchanged. It is
+   * a closure like the other two, which is what keeps this module testable with nothing loaded.
+   */
+  depenetrate?: (center: THREE.Vector3, skin?: number) => THREE.Vector3 | null;
 }
 
 /** `MoveInput` plus the jump key's PRESS edge, which the swim breach is triggered on. */
@@ -58,12 +67,65 @@ export function movementFrame(
   dt: number,
   now: number,
 ): FrameResult {
+  // PHASE TIMING -- see `move-phases.ts` on the 100 us clock and why these accumulate.
+  const tFrame = performance.now();
+  const tSurface = tFrame;
   const surfaceZ = deps.surfaceAt(state.pos);
+  notePhase('surfaceAt', (performance.now() - tSurface) * 1000);
   updateSwimming(state, surfaceZ, now);
 
   if (!state.swimming) {
     state.swimStrokeSpeed = 0;
-    return { outcome: step(state, deps.cast, input, dt, now), swim: null };
+
+    /**
+     * **SUBSTEPPING: the body meets the world in steps of the same SIZE whatever the frame rate is.**
+     *
+     * This is the owner's actual requirement -- "не проваливаться под текстуры даже с низким фпс" --
+     * and the reason a swept mover still needs it. The sweep itself cannot tunnel at any `dt`; what
+     * breaks at low frame rates is that every OTHER quantity in a step is scaled by the travel. The
+     * slide gets four iterations however far it goes, the step-up looks one frame ahead, the descent
+     * cap is `travel * 1.849`. At 27 fps his travel measured 0.35 yd against 0.12 at 60, so the same
+     * stair was met with a third of the resolution -- and his uneven descent was exactly that.
+     *
+     * The count comes from the DISTANCE the frame intends, not from its duration, so a stationary
+     * body never pays for a long frame and a sprint on a good one still takes a single step.
+     *
+     * JUMP FIRES ONCE. `wantJump` is an edge, and handing it to three substeps would apply the
+     * take-off impulse three times. The first substep keeps it; the rest are handed a copy with it
+     * cleared, which is also how the arc then belongs to gravity rather than to the key.
+     *
+     * The LAST outcome is the frame's: each substep resolves against the world in turn, so the final
+     * one holds the position, the grounded verdict and the support the caller needs. `held` and
+     * `jumped` are OR-ed, because a settle hold or a take-off anywhere in the frame is true of the
+     * frame.
+     */
+    const speed = input.moving ? input.speed : 0;
+    const intended = speed * dt;
+    const substeps = Math.min(
+      MAX_SUBSTEPS,
+      Math.max(1, Math.ceil(intended / MAX_SUBSTEP_TRAVEL)),
+    );
+
+    if (substeps === 1) {
+      const outcome = step(state, deps.cast, input, dt, now, deps.depenetrate);
+      notePhase('total', (performance.now() - tFrame) * 1000);
+      return { outcome, swim: null };
+    }
+
+    const slice = dt / substeps;
+    // Allocated only when the frame actually splits, which is a low-frame-rate frame by definition.
+    const later: FrameInput = { ...input, wantJump: false, jumpPressed: false };
+    let outcome = step(state, deps.cast, input, slice, now, deps.depenetrate);
+    for (let i = 1; i < substeps; ++i) {
+      const next = step(state, deps.cast, later, slice, now, deps.depenetrate);
+      outcome = {
+        ...next,
+        held: outcome.held || next.held,
+        jumped: outcome.jumped || next.jumped,
+      };
+    }
+    notePhase('total', (performance.now() - tFrame) * 1000);
+    return { outcome, swim: null };
   }
 
   if (input.jumpPressed) {
@@ -76,6 +138,7 @@ export function movementFrame(
     state.fallStartZ = state.pos.z;
     state.fallFar = false;
 
+    notePhase('total', (performance.now() - tFrame) * 1000);
     return { outcome, swim: null };
   }
 
@@ -113,6 +176,7 @@ export function movementFrame(
 
   const swim = swimStep(state, deps.cast, inputVel, surfaceZ, deps.surfaceAt, dt);
 
+  notePhase('total', (performance.now() - tFrame) * 1000);
   return {
     outcome: {
       held: state.settling,

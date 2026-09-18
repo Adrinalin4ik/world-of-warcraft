@@ -35,6 +35,7 @@ import {
 import { SPELL_AUTO_ATTACK, SpellHandler } from '../../network/game/object/spells';
 import { fireEvent } from './framexml/lua/events';
 import { getCast, setCast } from './framexml/lua/api/casting';
+import castWithRefusal from './cast-refusal';
 import { gameTime } from './framexml/lua/compat';
 import { spellData } from '../pipeline/dbc/spell-data';
 import { renderSpellDescription } from '../pipeline/dbc/spell-description';
@@ -42,6 +43,7 @@ import { casterStatsFor } from './caster-stats';
 import { shapeshiftData } from '../pipeline/dbc/shapeshift-data';
 import { LuaVM } from './framexml/lua/vm';
 import type Unit from '../classes/unit';
+import { DEFAULT_COMBAT_REACH, rangeState } from '../classes/action-range';
 
 /**
  * Subscribe a VM to the server's action bar. Returns the teardown.
@@ -119,9 +121,31 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
    * The distance is measured in the world's own units, which are YARDS -- the same units
    * `SpellRange.dbc` stores. It is a 3D distance including height, which is what the server checks.
    */
-  const rangeOf = (spellId: number): number | null => {
-    const yards = spellData.maxRange(spellId);
-    if (yards === null) {
+  /**
+   * `IsActionInRange`'s tri-state answer -- and it now judges the MINIMUM as well as the maximum.
+   *
+   * The owner: "Я стою вблизи, мне хватает ярости на charge, но charge нельзя использовать вблизи."
+   * This used to read `maxRange` alone, so Charge -- whose row carries a real minimum of **8.00
+   * yards** -- reported `1` at point-blank range and the hotkey stayed grey.
+   *
+   * The whole rule, its four arms and the byte-verified constants live in
+   * `classes/action-range.ts`; this is only the seam that gathers the live inputs. Two of them are
+   * worth naming here:
+   *
+   *  - **the reaches are the units' own** `UNIT_FIELD_COMBATREACH`, already decoded
+   *    (`update-object/unit-fields.ts:87`), so a large mob is reachable at a greater centre
+   *    distance. A reach that has not streamed falls back to the reference's own 1.5.
+   *  - **the distance stays SQUARED.** No square root is taken anywhere on this path -- the
+   *    reference compares squares (`IsTargetInRange 0x6e47b0`), and at 24 buttons a frame that is
+   *    24 avoided `Math.sqrt` calls for free.
+   *
+   * `null` is returned for every untestable case -- no target, target not streamed, unknown spell,
+   * or a spell with no range row -- which makes the hotkey HIDE rather than claim a range this
+   * client cannot judge.
+   */
+  const rangeOf = (spellId: number): 0 | 1 | null => {
+    const row = spellData.spell(spellId);
+    if (row === null) {
       return null;
     }
     const player = world.player;
@@ -136,7 +160,13 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     const dx = target.position.x - player.position.x;
     const dy = target.position.y - player.position.y;
     const dz = target.position.z - player.position.z;
-    return Math.sqrt(dx * dx + dy * dy + dz * dz) <= yards ? 1 : 0;
+    return rangeState(
+      row,
+      spellData.spellRange(spellId),
+      player.fields.combatReach ?? DEFAULT_COMBAT_REACH,
+      target.fields.combatReach ?? null,
+      dx * dx + dy * dy + dz * dz,
+    );
   };
 
   /** Build the snapshot for one 1-based slot from the handler and the DBC tables. */
@@ -163,8 +193,22 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       // A token the evaluator cannot resolve is left VISIBLE -- see `spell-description.ts`.
       description: row === null ? '' : renderSpellDescription(row, casterStatsFor(world, spells)),
       isAttack: spellId === SPELL_AUTO_ATTACK,
-      // Only auto-attack drives "current" today; see `api/actions.ts`'s `IsCurrentAction`.
-      isCurrent: spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn,
+      /**
+       * "CURRENT" -- what `IsCurrentAction` answers and what `ActionButton_UpdateState` turns into
+       * the button's CHECKED ring (`actionbutton.lua`). Two things drive it, and the second is new.
+       *
+       * Auto-attack while engaged, as before. AND a QUEUED ON-NEXT-SWING STRIKE: the owner presses
+       * Heroic Strike, it waits on the server's melee slot, and the real client keeps the button lit
+       * for exactly that wait. The reference's checked state reads BOTH of its slots for this --
+       * "the checked ring reads both (the ref's `IsCurrentAction` C2 leg -- spell == inflight)"
+       * (`benilla-app/src/ui_cast.rs:170-173`).
+       *
+       * **THE RING IS THE CLIENT'S OWN LUA, drawn from its own XML** -- nothing here draws a
+       * highlight. This pushes one boolean into the snapshot `IsCurrentAction` reads, and
+       * `ActionButton_UpdateState` does the rest, which is the same division every other field in
+       * this snapshot follows.
+       */
+      isCurrent: currentFor(spellId),
       cooldownStart: cooldown?.start ?? 0,
       cooldownDuration: cooldown?.duration ?? 0,
       usable,
@@ -274,15 +318,60 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     stats.events += 1;
   };
 
-  /** Only the auto-attack button's checked state moved, so only the state event is needed. */
-  const pushAutoAttack = (): void => {
+  /**
+   * **"CURRENT" -- the one predicate `IsCurrentAction` answers, in ONE place.**
+   *
+   * Two things make a slot current, and they are different states with different textures:
+   *
+   *  - **auto-attack while engaged.** This one also FLASHES, via `PLAYER_ENTER_COMBAT` and the
+   *    `$parentFlash` texture (`ActionButtonTemplate.xml:12`, `Interface\Buttons\UI-QuickslotRed`).
+   *  - **a QUEUED on-next-swing strike.** This one only CHECKS -- the `<CheckedTexture
+   *    alphaMode="ADD" file="Interface\Buttons\CheckButtonHilight"/>` at
+   *    `ActionButtonTemplate.xml:88`, which is the bright additive border the owner screenshotted.
+   *
+   * Factored out because the snapshot builder and `pushQueuedMelee` both need it and a second copy
+   * would be a second answer that could differ. The reference reads both of its slots for the same
+   * predicate (`benilla-app/src/ui_cast.rs:170-173`, the `IsCurrentAction` C2 leg).
+   *
+   * **NOTHING HERE DRAWS AND NOTHING NEEDED TO.** The texture is the client's own, declared in its
+   * own XML, and `SetChecked` already shows and hides it -- proven by the spellbook, whose IDENTICAL
+   * `<CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>`
+   * (`spellbookframe.xml:191`) was observed drawing over all twelve buttons when a truthiness bug
+   * checked them all (`lua/methods/kinds.ts:652-670`). So the last hop was never in doubt; the
+   * defect was that this value did not reach Lua.
+   */
+  const currentFor = (spellId: number): boolean => (
+    (spellId === SPELL_AUTO_ATTACK && spells.autoAttackOn)
+    || (spellId !== 0 && spellId === spells.queuedMeleeSpell)
+  );
+
+  /**
+   * A queued on-next-swing strike was armed or landed: re-push the CHECKED state and fire the
+   * client's own state event.
+   *
+   * **THE WHOLE DEFECT WAS THIS FUNCTION'S ABSENCE.** `isCurrent` already consulted the queue in the
+   * snapshot builder, so the state was right -- but the builder only runs on a full push, and neither
+   * incremental push could carry it: `pushCooldowns` spreads `...previous` (keeping the OLD
+   * `isCurrent`) and fires `ACTIONBAR_UPDATE_COOLDOWN`, which `ActionButton_OnEvent:396` routes to
+   * `ActionButton_UpdateCooldown` alone. Arming the queue emitted nothing at all. So the button could
+   * never check: a last-hop failure, not anything about drawing.
+   *
+   * `ACTIONBAR_UPDATE_STATE` is the right event and the only one that reaches the checked state:
+   * `ActionButton_OnEvent:390` routes it to `ActionButton_UpdateState`, whose entire body is
+   * `SetChecked` (`actionbutton.lua:302-311`). It touches no texture, no count and no cooldown, so a
+   * queued strike costs one `SetChecked` per filled button and nothing else.
+   *
+   * Push THEN fire, this file's rule everywhere: `ActionButton_UpdateState` re-reads
+   * `IsCurrentAction`, so the snapshot has to be current before the event goes out.
+   */
+  const pushQueuedMelee = (): void => {
     let changed = false;
     for (let action = 1; action <= ACTION_SLOTS; action += 1) {
       const previous = getAction(vm, action);
-      if (previous === null || previous.spellId !== SPELL_AUTO_ATTACK) {
+      if (previous === null || previous.spellId === 0) {
         continue;
       }
-      const next = { ...previous, isCurrent: spells.autoAttackOn };
+      const next = { ...previous, isCurrent: currentFor(previous.spellId) };
       if (same(previous, next)) {
         continue;
       }
@@ -291,9 +380,86 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       stats.pushes += 1;
     }
     if (changed) {
-      // `ACTIONBAR_UPDATE_STATE` is precisely the checked/flash event
-      // (`ActionButton_OnEvent:390` -> `ActionButton_UpdateState`), and it does NOT re-read the texture.
       fireEvent(vm, 'ACTIONBAR_UPDATE_STATE');
+      stats.events += 1;
+    }
+  };
+
+  /**
+   * The last auto-attack state this fired the combat pair for -- so the two events go out on the
+   * TRANSITION and not on every call. `null` until the first push.
+   */
+  let flashedAttacking: boolean | null = null;
+
+  /**
+   * Auto-attack turned on or off: the checked ring AND **the flash**.
+   *
+   * The owner: "auto attack slot should blip if activated."
+   */
+  const pushAutoAttack = (): void => {
+    let changed = false;
+    for (let action = 1; action <= ACTION_SLOTS; action += 1) {
+      const previous = getAction(vm, action);
+      if (previous === null || previous.spellId !== SPELL_AUTO_ATTACK) {
+        continue;
+      }
+      // THE SHARED PREDICATE, not `spells.autoAttackOn` alone: this walk only visits auto-attack
+      // slots, so the two agree today -- but the narrower expression here is how the queue term
+      // would get silently dropped if this loop were ever widened.
+      const next = { ...previous, isCurrent: currentFor(previous.spellId) };
+      if (same(previous, next)) {
+        continue;
+      }
+      setAction(vm, action, next);
+      changed = true;
+      stats.pushes += 1;
+    }
+    if (changed) {
+      // `ACTIONBAR_UPDATE_STATE` is the CHECKED event and only that
+      // (`ActionButton_OnEvent:390` -> `ActionButton_UpdateState`, whose whole body is `SetChecked`);
+      // it does NOT re-read the texture. **An earlier version of this comment called it "the
+      // checked/flash event" and that was wrong** -- nothing on this event's arm reaches
+      // `ActionButton_UpdateFlash`, which is why the button never blinked. The flash is the pair
+      // below.
+      fireEvent(vm, 'ACTIONBAR_UPDATE_STATE');
+      stats.events += 1;
+    }
+
+    /**
+     * **THE FLASH: `PLAYER_ENTER_COMBAT` / `PLAYER_LEAVE_COMBAT`, and NOT the regen pair.**
+     *
+     * Read out of the served `interface/framexml/actionbutton.lua` rather than from memory. Two
+     * things there decide it:
+     *
+     *  - `ActionButton_OnEvent:400-407` -- `PLAYER_ENTER_COMBAT` calls `ActionButton_StartFlash(self)`
+     *    when `IsAttackAction(self.action)`, and `PLAYER_LEAVE_COMBAT` calls `StopFlash`. Those two
+     *    are the MELEE SWING events, not the in-combat flag (that is
+     *    `PLAYER_REGEN_DISABLED`/`_ENABLED`, which this bar never registers -- `:173-183`).
+     *  - `ActionButton_StartFlash:505-509` sets `self.flashing = 1` and `self.flashtime = 0`, and
+     *    `ActionButton_OnUpdate:437-458` then toggles the `Flash` texture every
+     *    `ATTACK_BUTTON_FLASH_TIME` while `ActionButton_IsFlashing(self)` -- so the blink itself is
+     *    the client's own per-frame handler and its own texture. **Nothing is drawn here.**
+     *
+     * THE TICK WAS ALREADY THERE, which is what made this a globals-and-events task rather than a
+     * runtime one: `framexml/world-runtime.ts:673-705` drives the 24 named action-button
+     * `<OnUpdate>`s as its third deliberate exception to "no general dispatch", and names the attack
+     * flash as one of the two reasons it exists. Both globals the predicate reads already exist too
+     * (`IsAttackAction`, `IsCurrentAction` in `api/actions.ts`) and both return real Lua booleans, so
+     * the `0`-is-truthy trap does not apply to either. The ONLY missing piece was this pair.
+     *
+     * ON THE TRANSITION, tracked locally rather than off `changed` above: `changed` is a snapshot
+     * diff over the auto-attack slots, so it is false when no button holds auto-attack and false on a
+     * re-push of the same value -- neither of which is the question "did attacking start or stop".
+     * Firing `PLAYER_ENTER_COMBAT` twice would restart the flash mid-blink.
+     *
+     * AFTER the push, which is this file's rule everywhere: `StartFlash` calls
+     * `ActionButton_UpdateState`, which re-reads `IsCurrentAction`, so the snapshot has to be current
+     * before the event goes out.
+     */
+    const attacking = spells.autoAttackOn;
+    if (flashedAttacking !== attacking) {
+      flashedAttacking = attacking;
+      fireEvent(vm, attacking ? 'PLAYER_ENTER_COMBAT' : 'PLAYER_LEAVE_COMBAT');
       stats.events += 1;
     }
   };
@@ -320,7 +486,9 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
       }
       return;
     }
-    spells.castSpell(spellId, target);
+    // Through the shared door, so the in-flight refusal and its red line behave the same here as on
+    // the spellbook, the shapeshift bar and the duel accept. See `cast-refusal.ts`.
+    castWithRefusal(vm, spells, spellId, target);
   };
 
   setActionUseHandler(vm, use);
@@ -570,6 +738,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
   spells.on('spellsChanged', pushAll);
   spells.on('autoAttackChanged', pushAutoAttack);
   spells.on('cooldownsChanged', pushCooldowns);
+  spells.on('queuedMeleeChanged', pushQueuedMelee);
   world.on('unit:fields', onFields);
 
   // Both entry packets arrive while the manifest is still loading -- `SMSG_ACTION_BUTTONS` is in the
@@ -609,6 +778,7 @@ export function attachActionBridge(vm: LuaVM, world: World, art: GlueArt): () =>
     spells.removeListener('spellsChanged', pushAll);
     spells.removeListener('autoAttackChanged', pushAutoAttack);
     spells.removeListener('cooldownsChanged', pushCooldowns);
+    spells.removeListener('queuedMeleeChanged', pushQueuedMelee);
     spells.removeListener('spellStart', onSpellStart);
     spells.removeListener('spellDelayed', onSpellDelayed);
     spells.removeListener('spellGo', onSpellGo);

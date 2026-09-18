@@ -240,19 +240,29 @@ describe('spawnParticle — bone basis', () => {
     originZ: 1,
   };
 
-  it('rotates the spawn position without applying the bone translation', () => {
+  /**
+   * THIS TEST USED TO ENCODE THE DEFECT. It expected `(0, -1, 0)` -- the model-space offset
+   * `originZ: 1` added FIRST and then swung through the basis rotation, which is what displaced
+   * `DemonArmor_Impact_Head`'s emitters by up to a full unit while its mesh stayed put. A model-space
+   * point must not be rotated by the bone's own rotation, and this file's own `+90 degree` comment
+   * already stated that rule for the kernel turn.
+   *
+   * The double-count guard it also pinned is UNCHANGED and still asserted: `x` must never become 5.
+   */
+  it('adds the model-space offset AFTER the rotation, and never the basis translation', () => {
     const pool = new ParticlePool(4);
     const slot = pool.allocate();
 
     spawnParticle(pool, slot, { ...pointParams, basis: rotateXTranslate }, scriptedRandom([0.5]));
 
-    // (0, 0, 1) rotated about X is (0, -1, 0). If the basis translation were applied on top, x would
-    // be 5 -- and on a real model that is a double-count, because the emitter's own `position` already
-    // places it in model space. INSTANCEPORTAL.M2 has position and pivot both [0, 0, 2.74]; applying
-    // both put its ring's centre at 5.48 rather than 2.74.
+    // The point generator spawns at the origin, so the rotation acts on (0, 0, 0) and the authored
+    // offset lands verbatim: the emitter sits exactly where its `position` says, whatever the bone
+    // is doing. If the basis TRANSLATION were applied on top, x would be 5 -- a double-count, because
+    // `position` is already the bone's pivot in model space (measured identical on every emitter of
+    // every model checked, and on INSTANCEPORTAL.M2 both are [0, 0, 2.74]).
     expect(pool.position[slot * 3]).toBeCloseTo(0, 5);
-    expect(pool.position[slot * 3 + 1]).toBeCloseTo(-1, 5);
-    expect(pool.position[slot * 3 + 2]).toBeCloseTo(0, 5);
+    expect(pool.position[slot * 3 + 1]).toBeCloseTo(0, 5);
+    expect(pool.position[slot * 3 + 2]).toBeCloseTo(1, 5);
   });
 
   it('rotates velocity without translating it', () => {
@@ -586,5 +596,87 @@ describe('spawnParticle — common state', () => {
       expect(magnitude).toBeGreaterThanOrEqual(params.speed * 0.5 - 1e-4);
       expect(magnitude).toBeLessThanOrEqual(params.speed * 1.5 + 1e-4);
     }
+  });
+});
+
+/**
+ * THE INHERITED EMITTER MOTION (file flag 0x40) -- one arm, on the arithmetic that matters.
+ *
+ * `speedVariation: 0` so the `(1 + S11*speedVariation)` factor is exactly 1 and the assertion is on
+ * the inherit itself rather than on a random draw. `verticalRange`/`horizontalRange` 0 sends the
+ * emission velocity straight up local +Z at `speed`, so the inherit's X and Y land on axes the
+ * emission does not touch and cannot be confused with it.
+ */
+describe('spawnParticle — inherited emitter motion', () => {
+  it('adds the inherit vector to the birth velocity, on top of the emission speed', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, {
+      ...baseParams, inheritX: 3, inheritY: -4, inheritZ: 5,
+    }, scriptedRandom([0.5]));
+
+    expect(pool.velocity[slot * 3]).toBeCloseTo(3, 5);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(-4, 5);
+    // The emission's own 10 along +Z, plus the inherited 5.
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(15, 5);
+  });
+
+  it('leaves the birth velocity untouched when the emitter is not moving', () => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, {
+      ...baseParams, inheritX: 0, inheritY: 0, inheritZ: 0,
+    }, scriptedRandom([0.5]));
+
+    expect(pool.velocity[slot * 3]).toBeCloseTo(0, 5);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(0, 5);
+    expect(pool.velocity[slot * 3 + 2]).toBeCloseTo(10, 5);
+  });
+});
+
+/**
+ * BAKED ORIENTATION (`MODEL_SPACE` clear) -- see `integrate.ts#MODEL_SPACE`.
+ *
+ * Two assertions, because the change has two halves that must both hold: baking must compose to the
+ * SAME world position as the old full-matrix pack for a static emitter (or every campfire moves), and
+ * a baked particle must be untouched by the emitter's LATER rotation (which is the owner's report).
+ */
+describe('spawnParticle — baked emitter orientation', () => {
+  // A 90-degree yaw about Z, column-major as `Matrix4#elements` is.
+  const yaw90 = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const spawnAt = (worldLinear: number[] | null) => {
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, {
+      ...baseParams, areaWidth: 0, areaLength: 0, speed: 10, worldLinear,
+    }, scriptedRandom([0.5]));
+    return { pool, slot };
+  };
+
+  it('composes to the same world position a full-matrix pack would produce', () => {
+    // Emission is straight up local +Z at speed 10, so the VELOCITY is what the yaw acts on and it
+    // must be invariant under a yaw about Z -- the check that the linear part is applied correctly
+    // rather than transposed. A transposed 3x3 would be the inverse rotation here and show up on x/y.
+    const baked = spawnAt(yaw90);
+    const plain = spawnAt(null);
+    expect(baked.pool.velocity[baked.slot * 3 + 2]).toBeCloseTo(10, 5);
+    expect(baked.pool.velocity[baked.slot * 3]).toBeCloseTo(0, 5);
+    expect(baked.pool.velocity[baked.slot * 3 + 1]).toBeCloseTo(0, 5);
+    // And with no bake the same emission is identical, so a static emitter's cloud cannot move.
+    expect(plain.pool.velocity[plain.slot * 3 + 2]).toBeCloseTo(10, 5);
+  });
+
+  it('bakes the rotation into the velocity so a later rotation cannot turn the particle', () => {
+    // Velocity along local +X this time, which a yaw about Z DOES turn -- so the bake is observable.
+    const pool = new ParticlePool(4);
+    const slot = pool.allocate();
+    spawnParticle(pool, slot, {
+      ...baseParams,
+      areaWidth: 0, areaLength: 0, speed: 0, verticalRange: 0, horizontalRange: 0,
+      inheritX: 5, inheritY: 0, inheritZ: 0, worldLinear: yaw90,
+    }, scriptedRandom([0.5]));
+    // The yaw maps +X onto +Y, once, at birth. Nothing re-applies it afterwards.
+    expect(pool.velocity[slot * 3]).toBeCloseTo(0, 5);
+    expect(pool.velocity[slot * 3 + 1]).toBeCloseTo(5, 5);
   });
 });

@@ -50,7 +50,9 @@ import { Viewport } from '../layout';
 import { Widget } from '../widget';
 import { LoadReport, createFrameXmlRuntime, loadDocument } from './loader';
 import { cacheKey, prefetchManifest, registerTreeArt } from './manifest';
-import { CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, placeCaret, placeSelection } from './tick';
+import {
+  CARET_BLINK_SECONDS, collectButtons, collectEditBoxes, mirrorEditBoxText, placeCaret, placeSelection,
+} from './tick';
 import { parseXml } from './xml';
 import { installCompat } from './lua/compat';
 import { fireEvent } from './lua/events';
@@ -313,9 +315,9 @@ export async function bootGlueRuntime(options: GlueRuntimeOptions): Promise<Glue
       caretClock += dt;
       const litCaret = caretClock % (CARET_BLINK_SECONDS * 2) < CARET_BLINK_SECONDS;
       for (const { box, caret, selection } of editBoxes) {
-        if (box.textRegion !== null) {
-          box.textRegion.text = box.displayText;
-        }
+        // THROUGH `mirrorEditBoxText`, not a direct assignment: the horizontal window lives there
+        // and the caret and selection read the same one. See `tick.ts#editBoxWindow`.
+        mirrorEditBoxText(box);
         placeCaret(box, caret, input, litCaret);
         // TWO(b): the selection highlight, also ours and also engine-drawn in the real client. NOT
         // blinked -- only the caret blinks; a flashing selection is not a thing the client does.

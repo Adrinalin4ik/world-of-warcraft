@@ -9,9 +9,9 @@ import { readAutoLogin } from '../auto-login';
  * wrong, and "all four or nothing" is his own wording.
  */
 test('all four parameters are required, and the indices are 1-based integers', () => {
-  const full = readAutoLogin('?login=Adrinalin4ik&password=hunter2&realmIndex=1&characterIndex=2');
+  const full = readAutoLogin('?login=Test&password=hunter2&realmIndex=1&characterIndex=2');
   expect(full).toEqual({
-    login: 'Adrinalin4ik', password: 'hunter2', realmIndex: 1, characterIndex: 2,
+    login: 'Test', password: 'hunter2', realmIndex: 1, characterIndex: 2,
   });
 
   // A partial set is NOT a request: filling the form and stopping, or guessing realm 1, are different

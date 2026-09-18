@@ -75,6 +75,7 @@
 import DBC from './index';
 import Loader from '../../net/loader';
 import { spellWire } from '../../classes/spell-wire';
+import { SpellRangeRow } from '../../classes/action-range';
 
 /** `Spell.dbc` column indices for 3.3.5a build 12340. See the header for how each was established. */
 const COL = {
@@ -124,7 +125,87 @@ const COL = {
    * file agrees, column 12's maximum being `0xf807e0ff`, a shapeshift-form mask and not an attribute word.
    */
   attributes: 4,
+  /**
+   * `Targets` -- the TARGETING FLAG-WORD SEED, and the whole of "who may this spell be cast on".
+   *
+   * The real client seeds its targeting word from this column and then overlays one arm keyed on
+   * `EffectImplicitTargetA[0]`; a word of ZERO means the cast needs no target at all and ships
+   * `TARGET_FLAG_SELF` with no guid (`benilla-app/src/ui_action/cast_target.rs:4-16`, transcribing
+   * `Spell_C::ArmCast 0x6e5250` + `BindTarget 0x6e5b40`, both byte-verified there).
+   *
+   * **COLUMN 16 IS MEASURED, and the reference's own byte offset is useless here**: it states the
+   * field as `SpellRec+0x34`, a 1.12 offset. Three independent checks on the served
+   * `dbfilesclient/spell.dbc` (49839 records, 234 fields, 936 B, so a field index IS offset/4):
+   *
+   *  1. `wow-data-parser/dbc/entities/spell.js` reaches `targets` at declared index 16 by its own
+   *     field arithmetic, and the SAME arithmetic reaches `interruptFlags` at 31, `speed` at 47,
+   *     `effectIDs` at 71-73, `visualIDs` at 131 and `name` at 136 -- five indices this file and
+   *     `spell-visual.js` already measured independently. A declaration that lands all five cannot
+   *     be off by a column at 16.
+   *  2. The column is a BITMASK and nothing else: **15 distinct values across all 49839 rows**, every
+   *     one a power of two or a sum of them (`0` x46744, `0x40` x1145, `0x10` x768, `0x100` x476,
+   *     `0x20000` x355, `0x4000` x203, `0x20` x64, `0x8000` x50, `0x2` x11, `0x402` x9, ...).
+   *  3. **The reference's two byte-verified VALUES reproduce exactly.** It cites "Blizzard's bare
+   *     `Targets = 0x40`" and the LOCKED family's `0x4000`: here Blizzard 10 and Flamestrike 2120
+   *     both read **0x40**, and Opening 3365/6247, Mining 2575 and Herb Gathering 2366 all read
+   *     **0x4000**. Meanwhile every self-buff and every heal reads **0** -- which is the finding that
+   *     matters, because it means the friendly/hostile question is NOT in this column at all and is
+   *     decided by the implicit-target overlay below.
+   */
+  targets: 16,
+  /**
+   * `EffectImplicitTargetA[0]` -- the overlay arm that turns a zero `Targets` word into a real
+   * targeting requirement. Without it, a heal and a self-buff are indistinguishable.
+   *
+   * **COLUMN 86 IS MEASURED, and the ENUM VALUES ARE UNCHANGED FROM 1.12** -- which is a finding, not
+   * an assumption. The reference's arm map is byte-verified (`cast_target.rs:224-240`): `1` clears the
+   * explicit gate, `6|53` set UNIT_ENEMY, `16` is the ground arm, `21|45` set UNIT_ASSIST, `23` sets
+   * GAMEOBJECT, `25|63` set UNIT. Read off the served file at index 86, **every one of those arms
+   * lands on exactly the family it should**:
+   *
+   *      1   Frost Armor 168, Ice Armor 7302, Mage Armor 6117, Molten Armor 30482,
+   *          Mana Shield 1463, Ice Barrier 11426        -- the self-only buffs
+   *      6   Fireball 133, Frostbolt 116, Smite 585, Lightning Bolt 403, Immolate 348,
+   *          Corruption 172                             -- the enemy nukes
+   *     21   Lesser Heal 2050, Heal 2054, Greater Heal 2060, Holy Light 635, Rejuvenation 774,
+   *          Regrowth 8936, Power Word: Shield 17, Arcane Intellect 1459, Mark of the Wild 1126
+   *     45   Healing Wave 331/332                       -- the other half of the 21|45 arm
+   *     16   Flamestrike 2120                           -- the ground arm
+   *     23   Opening 3365, Mining 2575, Herb Gathering 2366  -- the LOCKED family
+   *
+   * Six arms, six families, no misses. That is much stronger evidence than a column scan could give,
+   * because the arms partition a set the reference named for a DIFFERENT build.
+   */
+  implicitTargetA0: 86,
   castingTimeIndex: 28,
+  /**
+   * `InterruptFlags` -- what BREAKS a cast in progress. Bit 0x1 is
+   * `SPELL_INTERRUPT_FLAG_MOVEMENT`, the movement self-cancel's gate (`game/classes/cast-cancel.ts`).
+   *
+   * **Column 31 is MEASURED, not ported.** The reference is 1.12 and states the field as `SpellRec+0x54`
+   * (`samples/benilla/crates/benilla-app/src/ui_cast.rs:336`), which is a 1.12 byte offset and says
+   * nothing about a 3.3.5a column index. What pins it is that the reference also records four
+   * byte-verified VALUES -- "Heroic Strike 78, Cleave 845, Raptor Strike 2973 all ship `InterruptFlags =
+   * 0x0` ... vs Fireball's `0xf`" (`ui_cast.rs:447-450`) -- and column 31 is the **only** column in the
+   * served 3.3.5a `Spell.dbc` that satisfies all four at once: a scan of columns 1-59 for
+   * `spell[133] == 0xf && spell[78] == spell[845] == spell[2973] == 0` returns exactly `[31]`.
+   *
+   * It corroborates the declaration independently: `dbc/entities/spell.js` reaches `interruptFlags` at
+   * declared index 31 by its own field arithmetic, and so does `speed` at 47 (Fireball reads 24.0 there),
+   * which was checked in the same pass.
+   */
+  interruptFlags: 31,
+  /**
+   * `ChannelInterruptFlags` -- what breaks a CHANNEL. Bit 0x8 is `AURA_INTERRUPT_FLAG_MOVE`, the
+   * channel half of the movement cancel (`ui_cast.rs:337`).
+   *
+   * Two columns after `interruptFlags`, with `AuraInterruptFlags` between them, which is the order
+   * `dbc/entities/spell.js:37-39` declares. Read back off the served file, every channelled spell
+   * checked carries **0x7c0c** here -- Mind Flay 15407, Drain Life 689, Health Funnel 755, Hellfire
+   * 1949 -- and `0x7c0c & 0x8` is set, so movement cancels all four. Fireball (not a channel) and
+   * Heroic Strike both read 0.
+   */
+  channelInterruptFlags: 33,
   /**
    * `SpellLevel` -- the character level this rank of the spell is learned at.
    *
@@ -149,6 +230,17 @@ const COL = {
   manaCost: 42,
   /** `rangeIndex` -> `SpellRange.dbc`, which is what `IsActionInRange` needs. */
   rangeIndex: 46,
+  /**
+   * `Speed` -- the PROJECTILE speed in world units per second, and the missile's whole gate: the
+   * reference's spawn test is "Speed alone" (`benilla-app/src/entities/missile.rs` /
+   * `creature_anim/spell_visual.rs:951-953`, "the spawn gate is Speed **alone** ... every basic shot
+   * spell has no `SpellVisual` row at all and still flies").
+   *
+   * Column 47 is measured, not ported: scanning Fireball 133's row for a float in [5,100] returns
+   * exactly one column, 47, reading **24.0**. It also sits immediately after `rangeIndex` at 46, which
+   * this file had already established independently, so the pair corroborates.
+   */
+  speed: 47,
   /** `ManaCostPercentage` -- a PERCENT OF BASE MANA, used instead of `manaCost` by most caster spells. */
   manaCostPercentage: 204,
   /** `StartRecoveryCategory`: 133 is the shared global-cooldown group; 0 means the spell is off-GCD. */
@@ -382,8 +474,30 @@ export interface SpellRow {
   iconID: number;
   /** `SpellVisual.dbc` id, or 0 for a spell with no visual (spell 6603 Auto Attack is one). */
   visualID: number;
+  /** `Targets` -- the targeting flag-word seed. See `COL.targets`; consumed by `classes/cast-target.ts`. */
+  targets: number;
+  /**
+   * The first THREE attribute words, raw: `Attributes`, `AttributesEx1`, `AttributesEx2` -- columns
+   * 4, 5 and 6. See `COL.attributes` for how the 8-word block was pinned.
+   *
+   * Exposed because `classes/auto-attack-start.ts`' predicate spans all three, and a derived boolean
+   * on this row cannot express a test whose two positive legs live in different words. The existing
+   * `passive` / `hiddenInSpellbook` / `hiddenFromAuraBar` booleans stay exactly as they are -- they
+   * are single-bit reads with named meanings and are not re-derived from these.
+   */
+  attributes: number;
+  attributesEx1: number;
+  attributesEx2: number;
+  /** `EffectImplicitTargetA[0]` -- the flag-word overlay arm. See `COL.implicitTargetA0`. */
+  implicitTargetA0: number;
   /** `SpellCastTimes.dbc` id. Read for a later round; cast TIME is deferred. */
   castingTimeIndex: number;
+  /** `InterruptFlags`. Bit 0x1 = movement breaks the cast. See `COL.interruptFlags`. */
+  /** `Speed`, world units/sec. `0` for a spell with no projectile -- see `COL.speed`. */
+  speed: number;
+  interruptFlags: number;
+  /** `ChannelInterruptFlags`. Bit 0x8 = movement breaks the channel. See `COL.channelInterruptFlags`. */
+  channelInterruptFlags: number;
   powerType: number;
   manaCost: number;
   /** `Category`. 0 for a spell in no shared-cooldown group. */
@@ -506,6 +620,41 @@ export function effectRange(
   return { min: basePoints + growth + 1, max: basePoints + growth + sides };
 }
 
+/**
+ * The client's literal missile-model fallback when a visual names a `SpellVisualEffectName` id that
+ * does not resolve -- a checkerboard cube shipped in the real MPQs, and the reference's own note on it
+ * is "faithful, not a joke" (`benilla-app/src/creature_anim/spell_visual.rs:27-29`, its `ERROR_CUBE`).
+ *
+ * Spelled with the DBC's own `.mdx`, exactly as the reference spells it, because it travels the same
+ * route as every other path out of this module: `M2Blueprint.load` rewrites the extension and
+ * `Loader#normalizePath` lowercases it. On this host `spells/errorcube.m2` answers 200 and its first
+ * four bytes are `MD20`, so the fallback is a real model here and not a second dead end.
+ */
+const ERROR_CUBE_MODEL = 'Spells\\ErrorCube.mdx';
+
+/**
+ * THE THREE-WAY MISSILE FORK, as a pure function of the column value and a path lookup.
+ *
+ * Separated from `SpellData#missileModelPath` only so the decision can be asserted without loading
+ * 49 MB of DBC -- the reference keeps a synthetic-table seam on its own catalog for the same reason
+ * (`spell_visual/mod.rs:439-457`). There is one implementation and the method calls this.
+ *
+ * `effectId` is `SpellVisual` column 8 as stored, SIGNED, or `undefined` for a visual whose column is
+ * zero. `pathOf` is `SpellData#effectModelPath`. See `missileModelPath` for every measured number.
+ */
+export function missileModelFrom(
+  effectId: number | undefined,
+  pathOf: (id: number) => string | null,
+): string | null {
+  // Below the gate -- including the 90 NEGATIVE rows -- means "this visual names no missile", which is
+  // not the error case. Returning `ERROR_CUBE_MODEL` here would be the defect the column's own
+  // docstring quantifies.
+  if (effectId === undefined || !Number.isFinite(effectId) || effectId < 1) {
+    return null;
+  }
+  return pathOf(effectId) ?? ERROR_CUBE_MODEL;
+}
+
 class SpellData {
   private spells: Map<number, SpellRow> | null = null;
 
@@ -523,11 +672,118 @@ class SpellData {
    */
   private precastKits: Map<number, number> | null = null;
 
+  /**
+   * `SpellVisual.dbc` id -> its IMPACT-stage kit id (column 3), which plays on the TARGET rather than
+   * on the caster. Reachable at last: it needs `SMSG_SPELL_GO`'s hit list, which this round decodes.
+   */
+  private impactKits: Map<number, number> | null = null;
+
+  /**
+   * `SpellVisual.dbc` id -> its STATE-stage kit id (column 4) -- the kit that belongs to an AURA's
+   * life rather than to a cast edge.
+   *
+   * The fourth of the stage quartet, and the one whose lifetime is the aura's: the reference's aura
+   * watcher reads `SpellVisual` field 4 and plays it at stage 2 for exactly as long as the spell id
+   * sits in the unit's aura slots (`benilla-app/src/creature_anim/spell_visual.rs:1132`
+   * `arm_aura_state_fx`, byte-verified there as `0x604d00 -> 0x6123f0 -> 0x5ff350` with
+   * `0x5ff4c2: push 2`). Field 4 is one of the four indices 3.3.5a did NOT move --
+   * `dbc/entities/spell-visual.js` measures the inserted column at index 5 -- so this is the one
+   * stage column where the reference's index transfers unchanged, and it is stated rather than
+   * assumed.
+   *
+   * MEASURED on the served `spellvisual.dbc` (9406 records, 32 fields, 128 B): **3837 rows carry a
+   * non-zero state kit and 2201 distinct kits are named, every one of them a live
+   * `SpellVisualKit` row.** Same zero-sentinel rule as the three stage columns above.
+   */
+  private stateKits: Map<number, number> | null = null;
+
+  /**
+   * `SpellVisual.dbc` id -> its `missileMotionID` (column 21), a `SpellMissileMotion.dbc` key.
+   *
+   * Measured 99.9% valid against that table's 204 ids; resolved, the top values read "Parabola" (255
+   * visuals), "Parabola (High)" (64), "Forward Spin + Parabola" (61).
+   */
+  private missileMotions: Map<number, number> | null = null;
+
+  /**
+   * `SpellMissileMotion.dbc` id -> `{ name, script }`, where **script is LUA SOURCE**.
+   *
+   * The flight law is authored as script rather than as coefficients, which is why this table has a
+   * 57,509-byte string block for 204 rows. Nothing evaluates it yet -- see
+   * `world/spell-missile.ts` for the whole finding, the Parabola script quoted, and why running it
+   * needs its own round. It is loaded and exposed so that round starts from the data.
+   */
+  private missileMotionRows: Map<number, { name: string; script: string }> | null = null;
+
   /** `SpellVisualKit.dbc` id -> its `animID`, sentinels already folded away. */
   private kitAnims: Map<number, number> | null = null;
 
-  /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. What `IsActionInRange` is judged against. */
+  /**
+   * `SpellVisualEffectName.dbc` id -> the effect model's path, EXACTLY AS THE DBC SPELLS IT.
+   *
+   * Not normalised and not extension-rewritten here, deliberately -- see `effectModelPath` for the
+   * two places that already own those two jobs. 3964 of the table's 3965 rows carry a path; the one
+   * that does not is id 3250 "Detect Invisibility and Stealth State", whose path column is the empty
+   * string, and an empty path is dropped so it reads as absent rather than as a path to nowhere.
+   */
+  private effectPaths: Map<number, string> | null = null;
+
+  /**
+   * The `"HARDCODED *"` rows, LOWERCASED NAME -> path -- the engine-spawned effect set, which the
+   * client resolves BY NAME once at boot rather than by id (a baked string table matched against the
+   * name column, `spell_visual/mod.rs:53-58`). Lowercased because the client's matchers are
+   * `stricmp`-family, which the reference notes at `mod.rs:691-693`.
+   *
+   * **16 rows on this build**, enumerated in `hardcodedEffectPath`. Nothing consumes them yet: they
+   * are the corpse sparkle, the level-up ding, the mount poof and friends, none of which is wired.
+   */
+  private hardcodedEffects: Map<string, string> | null = null;
+
+  /**
+   * `SpellVisual.dbc` id -> its `missileModelID` (column 8), signed and non-zero only.
+   *
+   * Kept as the raw id rather than a resolved path so the `>= 1` gate and the ErrorCube fallback stay
+   * in one expression in `missileModelPath`, where the reference puts them.
+   */
+  private missileModels: Map<number, number> | null = null;
+
+  /**
+   * `SpellVisualKit.dbc` id -> its ELEVEN emitter slots, in kit-field order, `null` for an empty slot.
+   *
+   * Eleven and not the reference's nine: 3.3.5a inserts two between the breath slot and the specials
+   * (`dbc/entities/spell-visual-kit.js` carries the measurement). The array is always length 11 so a
+   * slot INDEX is meaningful -- `game/classes/spell-kit-fx.ts` maps index to attachment tag, and a
+   * ragged array would make that mapping positional-by-accident.
+   *
+   * Both none-sentinels fold to `null`, the same dual sentinel this table uses on its anim column.
+   */
+  private kitSlots: Map<number, Array<number | null>> | null = null;
+
+  /**
+   * `SpellVisualKit.dbc` id -> its world-plant effect id (kit column 14), or absent.
+   *
+   * Kept apart from `kitSlots` because it is not an attach-point slot at all: it plants in world space
+   * at the owner's position/facing/scale with no bone (`spell_visual/mod.rs:110-120`). Folding it into
+   * the slot array would give it an index that implies a tag it does not have.
+   */
+  private kitWorldEffects: Map<number, number> | null = null;
+
+  /** `SpellRange.dbc` id -> `maxRangeHostile`, in YARDS. `maxRange`'s map; see `rangeRows` too. */
   private ranges: Map<number, number> | null = null;
+
+  /**
+   * `SpellRange.dbc` id -> the WHOLE row: min, max and flags.
+   *
+   * Added beside `ranges` rather than replacing it because the two answer different questions and
+   * `maxRange`'s two consumers want the old one: the tooltip's `$r` token wants a single number and
+   * `IsActionInRange` needs all three columns. **The minimum is the half that was missing** -- the
+   * bar judged Charge on its max alone and showed it usable at point-blank range.
+   *
+   * `flags & 1` is the MELEE row. Measured on the served file: 64 records, and id 2 "Combat" is the
+   * only row with that bit. See `classes/action-range.ts` for the full column table and the
+   * byte-verified formula that consumes it.
+   */
+  private rangeRows: Map<number, SpellRangeRow> | null = null;
 
   /** `SpellDuration.dbc` id -> `baseDuration` in MILLISECONDS. `$d`'s source. */
   private durations: Map<number, number> | null = null;
@@ -592,11 +848,18 @@ class SpellData {
     // `SpellDuration` (2.1 KB), `SpellRadius` (0.9 KB) and `SpellDescriptionVariables` (2.8 KB) ride
     // along for the same reason `SpellRange` does: together they are under 6 KB behind a 49 MB fetch
     // that is already in flight, and none of them is useful without `Spell.dbc`'s own index columns.
-    const [spells, icons, visuals, kits, ranges, durations, radii, descVars] = await Promise.all([
+    // `SpellVisualEffectName` (260 KB) rides along on the same argument the four small tables above
+    // take: it is the only table that turns a visual's missile column into a model path, it is useless
+    // without `SpellVisual` which is already being fetched, and 260 KB behind a 49 MB fetch that is
+    // already in flight costs nothing measurable.
+    const [spells, icons, visuals, kits, effectNames, missileMotions, ranges, durations,
+      radii, descVars] = await Promise.all([
       this.loadSpells(),
       DBC.load('SpellIcon'),
       DBC.load('SpellVisual'),
       DBC.load('SpellVisualKit'),
+      DBC.load('SpellVisualEffectName'),
+      DBC.load('SpellMissileMotion'),
       DBC.load('SpellRange'),
       DBC.load('SpellDuration'),
       DBC.load('SpellRadius'),
@@ -634,7 +897,17 @@ class SpellData {
     }
 
     this.ranges = new Map<number, number>();
+    this.rangeRows = new Map<number, SpellRangeRow>();
     for (const record of (ranges as any).records ?? []) {
+      // THE WHOLE ROW, for `IsActionInRange`. `minRangeHostile` is the column the old read dropped;
+      // `type` is the flag word whose bit 0 marks the melee row.
+      if (record && typeof record.maxRangeHostile === 'number') {
+        this.rangeRows.set(record.id, {
+          min: typeof record.minRangeHostile === 'number' ? record.minRangeHostile : 0,
+          max: record.maxRangeHostile,
+          flags: typeof record.type === 'number' ? record.type : 0,
+        });
+      }
       // `maxRangeHostile` is the one a cast at an enemy is judged by; `maxRangeFriendly` differs only for
       // a handful of spells and the client uses the hostile value for the indicator. Both are YARDS, as
       // floats (`wow-data-parser/dbc/entities/spell-range.js`).
@@ -654,6 +927,9 @@ class SpellData {
 
     this.castKits = new Map<number, number>();
     this.precastKits = new Map<number, number>();
+    this.impactKits = new Map<number, number>();
+    this.stateKits = new Map<number, number>();
+    this.missileMotions = new Map<number, number>();
     for (const record of (visuals as any).records ?? []) {
       if (record && record.castKitID) {
         this.castKits.set(record.id, record.castKitID);
@@ -667,6 +943,17 @@ class SpellData {
       // does not.
       if (record && record.precastKitID && record.precastKitID !== 0xffffffff) {
         this.precastKits.set(record.id, record.precastKitID);
+      }
+      // The impact stage. Same zero-sentinel rule as the two above.
+      if (record && record.impactKitID && record.impactKitID !== 0xffffffff) {
+        this.impactKits.set(record.id, record.impactKitID);
+      }
+      // The STATE stage -- the aura's own kit. Same zero-sentinel rule again.
+      if (record && record.stateKitID && record.stateKitID !== 0xffffffff) {
+        this.stateKits.set(record.id, record.stateKitID);
+      }
+      if (record && record.missileMotionID && record.missileMotionID !== 0xffffffff) {
+        this.missileMotions.set(record.id, record.missileMotionID);
       }
     }
 
@@ -683,6 +970,72 @@ class SpellData {
       }
     }
 
+    this.kitSlots = new Map<number, Array<number | null>>();
+    this.kitWorldEffects = new Map<number, number>();
+    for (const record of (kits as any).records ?? []) {
+      if (!record) {
+        continue;
+      }
+      // The eleven, in kit-field order (columns 3-13). `spell-visual-kit.js` names them
+      // head / chest / base / hand pair / breath / weapon pair / special triple.
+      const raw = [
+        record.headEffectID,
+        record.chestEffectID,
+        record.baseEffectID,
+        record.handEffectIDs?.[0],
+        record.handEffectIDs?.[1],
+        record.breathEffectID,
+        record.weaponEffectIDs?.[0],
+        record.weaponEffectIDs?.[1],
+        record.specialEffectIDs?.[0],
+        record.specialEffectIDs?.[1],
+        record.specialEffectIDs?.[2],
+      ];
+      const slots = raw.map((v) =>
+        (typeof v === 'number' && v !== 0 && v !== 0xffffffff ? v : null));
+      if (slots.some((v) => v !== null)) {
+        this.kitSlots.set(record.id, slots);
+      }
+      const world = record.worldEffectID;
+      if (typeof world === 'number' && world !== 0 && world !== 0xffffffff) {
+        this.kitWorldEffects.set(record.id, world);
+      }
+    }
+
+    this.missileMotionRows = new Map<number, { name: string; script: string }>();
+    for (const record of (missileMotions as any).records ?? []) {
+      const script = record?.script;
+      if (typeof script === 'string' && script !== '') {
+        this.missileMotionRows.set(record.id, { name: record.name ?? '', script });
+      }
+    }
+
+    this.effectPaths = new Map<number, string>();
+    this.hardcodedEffects = new Map<string, string>();
+    for (const record of (effectNames as any).records ?? []) {
+      const file = record?.file;
+      if (typeof file !== 'string' || file === '') {
+        continue;
+      }
+      this.effectPaths.set(record.id, file);
+      // The engine-spawned set, keyed by name and not by id -- see `hardcodedEffects`. Only rows the
+      // client's own boot name-resolve could hit, i.e. the `HARDCODED ` prefix.
+      const name = record?.name;
+      if (typeof name === 'string' && /^HARDCODED /i.test(name)) {
+        this.hardcodedEffects.set(name.toLowerCase(), file);
+      }
+    }
+
+    this.missileModels = new Map<number, number>();
+    for (const record of (visuals as any).records ?? []) {
+      // Stored when non-zero and left SIGNED. Zero is by far the common case -- 7554 of 9406 visuals
+      // name no missile at all -- so skipping it keeps the map at the 1852 rows that say anything.
+      const missile = record?.missileModelID;
+      if (typeof missile === 'number' && missile !== 0) {
+        this.missileModels.set(record.id, missile);
+      }
+    }
+
     spellWire.record({
       at: Date.now(),
       kind: 'TABLES_LOADED',
@@ -694,6 +1047,15 @@ class SpellData {
         castKits: this.castKits.size,
         precastKits: this.precastKits.size,
         kitAnims: this.kitAnims.size,
+        effectPaths: this.effectPaths.size,
+        hardcodedEffects: this.hardcodedEffects.size,
+        missileModels: this.missileModels.size,
+        kitSlots: this.kitSlots.size,
+        kitWorldEffects: this.kitWorldEffects.size,
+        impactKits: this.impactKits.size,
+        stateKits: this.stateKits.size,
+        missileMotions: this.missileMotions.size,
+        missileMotionRows: this.missileMotionRows.size,
         ms: Date.now() - startedAt,
       },
       bodySize: 0,
@@ -771,7 +1133,17 @@ class SpellData {
         spellLevel: col(COL.spellLevel),
         iconID: col(COL.iconID),
         visualID: col(COL.visual),
+        targets: col(COL.targets),
+        attributes: col(COL.attributes),
+        // `COL.attributes + 1` / `+ 2`: this file's own column note establishes that 4-11 are
+        // `Attributes` + `AttributesEx1..Ex7`, and `hiddenFromAuraBar` already reads `+ 1` this way.
+        attributesEx1: col(COL.attributes + 1),
+        attributesEx2: col(COL.attributes + 2),
+        implicitTargetA0: col(COL.implicitTargetA0),
         castingTimeIndex: col(COL.castingTimeIndex),
+        speed: flt(COL.speed),
+        interruptFlags: col(COL.interruptFlags),
+        channelInterruptFlags: col(COL.channelInterruptFlags),
         powerType: col(COL.powerType),
         manaCost: col(COL.manaCost),
         category: col(COL.category),
@@ -839,6 +1211,22 @@ class SpellData {
     return yards !== null && yards > 0 ? yards : null;
   }
 
+  /**
+   * The whole `SpellRange.dbc` row a spell points at -- min, max and flags -- or null.
+   *
+   * What `IsActionInRange` needs, where `maxRange` above is what the tooltip needs. Unlike that one
+   * this does NOT drop a zero max: the Self row (id 1, min 0 / max 0) is a real answer that
+   * `classes/action-range.ts` turns into "range does not apply", and folding it away here would
+   * make it indistinguishable from an unknown spell.
+   */
+  spellRange(spellId: number): SpellRangeRow | null {
+    const row = this.spell(spellId);
+    if (row === null) {
+      return null;
+    }
+    return this.rangeRows?.get(row.rangeIndex) ?? null;
+  }
+
   /** `SpellDuration.dbc` base duration in MILLISECONDS, or null. `$d`'s lookup. */
   durationMs(durationIndex: number): number | null {
     return durationIndex > 0 ? this.durations?.get(durationIndex) ?? null : null;
@@ -887,6 +1275,238 @@ class SpellData {
    * kit and no anim, which is correct -- its animation comes from `SMSG_ATTACKERSTATEUPDATE`, one clip
    * per swing, which `network/game/object/combat.ts` already drives.
    */
+  /**
+   * `SpellVisualEffectName.dbc` id -> the effect model's path, **as the DBC spells it**, or null.
+   *
+   * ## Two things this deliberately does NOT do, because this client already has one place for each
+   *
+   * **It does not rewrite the extension.** The DBC names Warcraft III extensions and the asset host
+   * serves none of them. Measured across the table's 2042 distinct non-empty paths: **1928 end `.mdx`,
+   * 108 end `.mdl`, 6 already end `.m2`** -- and probing every one of them against the host with the
+   * extension swapped to `.m2` answers **200 for 1936 of 2042 (94.8%)**. Probed as spelled, `.mdx` and
+   * `.mdl` both 404: `spells/fireball_missile_low.mdx` 404s while `spells/fireball_missile_low.m2`
+   * answers 200 and its first four bytes are `4d 44 32 30`, "MD20". So the rewrite is required -- and
+   * `M2Blueprint.load` at `pipeline/m2/blueprint.js:29-30` already does exactly it, for both
+   * extensions, for every model this client loads. A second rewrite here would be the duplicate-path
+   * defect, so callers hand this string to `M2Blueprint.load` unchanged.
+   *
+   * **It does not lowercase or convert separators.** The host is case-sensitive and the DBC writes
+   * mixed case with backslashes, so an un-normalised lookup 404s -- and a 404 returns an HTML page
+   * which then fails to DECODE, naming the wrong subsystem twice. `Loader#normalizePath`
+   * (`game/net/loader.js:15`) is the single place that does it, applied inside `Loader#url` so every
+   * fetch gets it. `url` also runs `encodeURI`, which matters for the paths containing a SPACE: the
+   * two in the sample (`World\Generic\Dwarf\Passive Doodads\...`) 404 unencoded and answer 200 encoded.
+   *
+   * ## The 106 that do not resolve
+   *
+   * The misses split almost entirely by original extension: **`.mdl` misses 90 of 108 (83.3%)** and
+   * **`.mdx` misses 16 of 1928 (0.8%)**. The `.mdl` rows are a `Particles\` set this build no longer
+   * ships -- dead alpha-era art still named in the table -- which is worth knowing before anyone reads
+   * a missing model as a resolver bug. A 404 is NOT this function's business: it answers from the DBC
+   * and the fetch is the caller's.
+   */
+  effectModelPath(effectId: number): string | null {
+    if (!Number.isFinite(effectId) || effectId < 1) {
+      return null;
+    }
+    return this.effectPaths?.get(effectId) ?? null;
+  }
+
+  /**
+   * THE MISSILE MODEL for a `SpellVisual.dbc` id: `SpellVisual` column 8 -> `SpellVisualEffectName`
+   * column 2 -> a model path. Null when the visual names no missile.
+   *
+   * ## Three outcomes, not two, and the boundary between them is the trap
+   *
+   * The reference's expression is `(missile_model >= 1).then(|| effect_path(id).unwrap_or(ERROR_CUBE))`
+   * (`benilla-app/src/creature_anim/spell_visual.rs:952-957`), which forks three ways:
+   *
+   *  - **below 1 -> `null`.** The visual chain names no missile. This is NOT the error case and must
+   *    not become one: the reference's own comment there says the spawner then falls back to the wire's
+   *    ammo model, and every basic shot spell lands here. Measured on the served file: **7644 of 9406
+   *    visuals** (7554 zero, **90 negative**).
+   *  - **1 or above and the lookup succeeds -> that path.** Measured: **1760 visuals**. Fireball's
+   *    visual 67 carries 365 -> `Spells\Fireball_Missile_Low.mdx`.
+   *  - **1 or above and the lookup FAILS -> the literal `Spells\ErrorCube.mdx`.** The client's own
+   *    fallback (`spell_visual.rs:27-29`). Measured: **2 visuals** -- visual 20 names effect 52 and
+   *    visual 9240 names effect 3343, and neither row exists in the table.
+   *
+   * The trap is the boundary, and `missileModelID`'s own docstring carries the number: the column is
+   * read as `int32` for this reason. Read as `uint32`, the 90 negative rows pass `>= 1`, fail the
+   * lookup, and come out as ErrorCube -- turning a 2-visual error path into a 92-visual one, so one
+   * visual in fifty would launch a checkerboard cube where the answer is "no missile".
+   */
+  missileModelPath(visualId: number): string | null {
+    return missileModelFrom(
+      this.missileModels?.get(visualId),
+      (id) => this.effectModelPath(id),
+    );
+  }
+
+  /**
+   * The `SpellVisualKit` id armed at `SMSG_SPELL_GO` -- the RELEASE stage, or null.
+   *
+   * The same `castKits` map `castAnimation` walks, one step short of the animation: which kit belongs
+   * to which cast edge is `classes/spell-anim.ts`'s knowledge and is deliberately not re-derived here,
+   * so this and `castAnimation` cannot disagree about it.
+   */
+  castKit(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    return this.castKits?.get(row.visualID) ?? null;
+  }
+
+  /**
+   * The `SpellVisualKit` id armed at `SMSG_SPELL_START` -- the HELD precast stage, or null. The
+   * `precastKits` half of the pair above; see `precastAnimation` for the measurement that establishes
+   * field 1 as the held pose.
+   */
+  precastKit(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    return this.precastKits?.get(row.visualID) ?? null;
+  }
+
+  /**
+   * The `SpellVisualKit` id of the IMPACT stage -- the kit that plays on the TARGET, not the caster.
+   *
+   * The third of the trio beside `castKit`/`precastKit` and read off the same `SpellVisual` row, so
+   * all three agree about which column is which stage. Its consumer needs `SMSG_SPELL_GO`'s hit list
+   * to know WHO to play it on.
+   */
+  impactKit(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    return this.impactKits?.get(row.visualID) ?? null;
+  }
+
+  /**
+   * The `SpellVisualKit` id of the STATE stage -- the kit an AURA owns, or null.
+   *
+   * The fourth of the quartet beside `castKit`/`precastKit`/`impactKit` and read off the same
+   * `SpellVisual` row, so all four agree about which column is which stage. Its consumer is the
+   * aura slot diff (`network/game/object/aura-visuals.ts`), not a cast edge: this kit is armed when
+   * a spell id APPEARS in a unit's aura slots and reaped when it leaves, which is why it is the only
+   * one of the four with a lifetime measured in minutes.
+   *
+   * Anchors from the served files, resolved end to end: Mana Shield 1463 -> visual 968 -> kit 990;
+   * Ice Barrier 11426 -> visual 4302 -> kit 3672; Ice Block 45438 -> visual 4325 -> kit 3709;
+   * Power Word: Shield 17 -> visual 784 -> kit 847.
+   */
+  stateKit(spellId: number): number | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    return this.stateKits?.get(row.visualID) ?? null;
+  }
+
+  /**
+   * A spell's missile MOTION script -- `{ name, script }` where `script` is Lua source, or null.
+   *
+   * `Spell.dbc` visual -> `SpellVisual` column 21 -> `SpellMissileMotion` column 2. Nothing evaluates
+   * it yet and `world/spell-missile.ts` says why; this is the door for the round that does, so that
+   * round reads the real script instead of re-deriving an arc.
+   */
+  missileMotionScript(spellId: number): { id: number; name: string; script: string } | null {
+    const row = this.spell(spellId);
+    if (row === null || row.visualID === 0) {
+      return null;
+    }
+    const motionId = this.missileMotions?.get(row.visualID);
+    if (motionId === undefined) {
+      return null;
+    }
+    const motion = this.missileMotionRows?.get(motionId);
+    // The id travels with the row because `world/spell-motion.ts` caches its compiled chunk by it --
+    // a compile cache keyed on the spell would recompile the same script once per spell sharing it,
+    // and Parabola alone is reached by 255 visuals.
+    return motion === undefined ? null : { id: motionId, ...motion };
+  }
+
+  /**
+   * `Spell.dbc` `Speed` -- world units/sec, or 0. THE MISSILE GATE: the reference's spawn test is
+   * Speed alone (`creature_anim/spell_visual.rs:951-953`), not `hasMissile` and not the model column.
+   */
+  spellSpeed(spellId: number): number {
+    return this.spell(spellId)?.speed ?? 0;
+  }
+
+  /**
+   * A kit's ELEVEN emitter slots, in kit-field order, `null` for an empty one -- or null when the kit
+   * has no populated slot at all.
+   *
+   * The array is the raw slot layout and carries no attachment tags: `game/classes/spell-kit-fx.ts`
+   * owns the index -> tag mapping, because that mapping is where the reference's evidence and this
+   * build's two unknown slots live.
+   */
+  kitEffectSlots(kitId: number): Array<number | null> | null {
+    return this.kitSlots?.get(kitId) ?? null;
+  }
+
+  /** A kit's world-plant effect id (kit column 14), or null. Not an attach-point slot -- see the field. */
+  kitWorldEffect(kitId: number): number | null {
+    return this.kitWorldEffects?.get(kitId) ?? null;
+  }
+
+  /**
+   * One of the engine-spawned `"HARDCODED *"` effects, by name, case-insensitively. Null when the name
+   * is not in the table.
+   *
+   * The client resolves this set by NAME at boot rather than by id (`spell_visual/mod.rs:53-58`), so
+   * the name is the key here too. Nothing consumes it yet -- it is the half of the table the kit slots
+   * never reach, and it is built now because it comes free with the load.
+   *
+   * **This build ships 16 such rows**, and all 16 are:
+   *
+   *     14    HARDCODED Loot Art                    Particles\LootFX.mdl
+   *     21    HARDCODED Unit Level Up               Spells\LevelUp\LevelUp.mdl
+   *     107   HARDCODED Breath Cold                 Particles\ColdBreath.mdl
+   *     108   HARDCODED Breath Underwater           Particles\Bubbles.mdl
+   *     200   HARDCODED Footstep Water Run Spray    Particles\FootstepSprayWater.mdl
+   *     201   HARDCODED Footstep Water Walk Spray   Particles\FootstepSprayWaterWalk.mdl
+   *     1185  HARDCODED Mount Poof                  spells\mountmorph_impact.mdx
+   *     1223  HARDCODED Inebriated Bubbles          Spells\Bubble_Drunk.mdx
+   *     1645  HARDCODED PetLoyalty Down Base        spells\loyaltydown_impact_base.mdx
+   *     1646  HARDCODED PetLoyalty Down Head        spells\loyaltydown_impact_head.mdx
+   *     1647  HARDCODED PetLoyalty Up Base          spells\loyaltyup_impact_base.mdx
+   *     1648  HARDCODED PetLoyalty Up Head          spells\loyaltyup_impact_head.mdx
+   *     2702  HARDCODED Meeting Stone Join          Spells\Bind_Impact_Base.mdx
+   *     2922  HARDCODED Reputation                  Spells\ReputationLevelUp.mdx
+   *     3207  HARDCODED Resist Spell                spells\resist_immune_effect.mdx
+   *     4392  HARDCODED Achievement Base            spells\Achievement_OnRoot.mdx
+   *
+   * (`\` stands for a backslash throughout this block -- the DBC's own separator, which would end this
+   * comment's escape rules if written literally.)
+   *
+   * **On "benilla has 14 and this build has 16": the two counts are not the same measurement, so the
+   * difference cannot be reported as a list of two rows.** The reference's 14 is the size of the 1.12
+   * CLIENT's baked string table at `0x61f5b0` -- the matcher's own name list -- while 16 is a row count
+   * in this build's DBC. No 1.12 dump of this table is in this repo, so the 1.12 ROW count is not
+   * measurable from here and no subtraction is claimed.
+   *
+   * What can be said from the data instead: id **4392 "HARDCODED Achievement Base"** cannot exist in
+   * 1.12, because achievements shipped in 3.0.2. And the four **PetLoyalty** rows (1645-1648) are the
+   * reverse case -- pet loyalty is a 1.12 mechanic that 3.0 removed, and its rows survive here with
+   * their models still served. Both facts are about the FEATURES, not about the reference's table.
+   *
+   * `Particles\LootFX.mdl` and `Spells\LevelUp\LevelUp.mdl` both answer 200 as `.m2`; nine other
+   * `Particles\*.mdl` rows in the sample do not, which is the `.mdl` attrition `effectModelPath`
+   * records.
+   */
+  hardcodedEffectPath(name: string): string | null {
+    if (typeof name !== 'string' || name === '') {
+      return null;
+    }
+    return this.hardcodedEffects?.get(name.toLowerCase()) ?? null;
+  }
+
   castAnimation(spellId: number): number | null {
     const row = this.spell(spellId);
     if (row === null || row.visualID === 0) {

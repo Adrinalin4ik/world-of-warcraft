@@ -162,4 +162,71 @@ describe('SetScript and the calling convention', () => {
     second.dispose();
     first.dispose();
   });
+
+  /**
+   * **A THROW FROM A NESTED HANDLER MUST NOT LEAK ONE HANDLER this INTO THE NEXT.**
+   *
+   * This became load-bearing when the legacy globals moved out of `_G` into a SHARED environment
+   * (`scripts.ts#legacyEnv`): with one table for the whole VM, a `finally` that failed to restore
+   * would leave the next handler reading a stale frame -- silent wrongness rather than an error.
+   *
+   * Both halves are asserted, and the nil half is the one that matters: at the OUTERMOST invocation
+   * the saved value is nil, so restoring means putting the keys back to absent. A restore that only
+   * handled the non-nil case would pass a nested-only test and fail here.
+   *
+   * The keys are read back through a real handler body rather than from JS, because that is the only
+   * place `this` is supposed to be visible at all.
+   */
+  it('restores the legacy globals to nil after a nested handler throws', () => {
+    const vm = new LuaVM();
+    const registry = new FrameRegistry();
+    const ctx = installObjectModel(vm, registry);
+
+    const error = vm.run(
+      `
+      probe = CreateFrame("Frame", "Probe")
+      probe:SetScript("OnClick", function(self, ...)
+        -- this is the handler own frame by now, so the question is what the PREVIOUS
+        -- invocation left behind: event and arg1 are only set from the args, and this fire
+        -- passes none.
+        probeEventWasNil = (event == nil)
+        probeArg1WasNil = (arg1 == nil)
+      end)
+
+      thrower = CreateFrame("Frame", "Thrower")
+      thrower:SetScript("OnClick", function(self, ...)
+        error("deliberate failure from a nested handler")
+      end)
+
+      outer = CreateFrame("Frame", "Outer")
+      outer:SetScript("OnClick", function(self, ...)
+        FireThrower()
+        -- After the nested throw, the outer handler must still see ITS OWN values.
+        outerSawOwnThis = (this == self)
+        outerSawOwnEvent = event
+      end)
+      `,
+      'scripts-throw.test.lua',
+    );
+    expect(error).toBeNull();
+
+    const throwerId = registry.byName('Thrower')!;
+    vm.registerFunction('FireThrower', () => {
+      invokeScriptHandler(ctx, throwerId, 'OnClick', ['NestedButton']);
+      return [];
+    });
+
+    // The nested handler throws; the outer one carries on and keeps its own globals.
+    const outerError = invokeScriptHandler(ctx, registry.byName('Outer')!, 'OnClick', ['OuterButton']);
+    expect(outerError).toBeNull();
+    expect(vm.getGlobal('outerSawOwnThis')).toBe(true);
+    expect(vm.getGlobal('outerSawOwnEvent')).toBe('OuterButton');
+
+    // And the outermost restore put `event`/`arg1` back to ABSENT, not to the thrower values.
+    const probeError = invokeScriptHandler(ctx, registry.byName('Probe')!, 'OnClick', []);
+    expect(probeError).toBeNull();
+    expect(vm.getGlobal('probeEventWasNil')).toBe(true);
+    expect(vm.getGlobal('probeArg1WasNil')).toBe(true);
+  });
+
 });

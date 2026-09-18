@@ -89,6 +89,29 @@ export class LuaVM {
   /** Next never-used slot. 1-based only so a slot number is never the falsy 0. */
   private nextSlot = 1;
 
+  /**
+   * **LIVE HANDLE COUNT -- the instrument that separates a LEAK from a state-dependent cost.**
+   *
+   * Every table or function crossing from Lua to JS mints a slot (`toJs`'s default branch calls
+   * `ref()`), and only an explicit `unref` gives it back. A caller that reads a table-valued global
+   * and forgets to release it therefore leaks one slot per call, and a per-frame caller leaks at
+   * frame rate -- which reads on a profile as a cost that GROWS with session length rather than one
+   * that depends on what is on screen. Those two look identical in a single sample and completely
+   * different in two, so the count is exported and censused rather than argued about.
+   *
+   * It is also the number that decides how much a leak COSTS. Slot allocation itself is O(1) here by
+   * design -- that is the whole point of not using `luaL_ref` (see `ref` below) -- so a leak is not
+   * automatically slow. But the handle table it grows is a fengari `Table` backed by a JS `Map`, and
+   * the measured `luaL_ref` table above is what a growing one did to this interface: a 10.1 s freeze.
+   * So a rising `liveHandles` is a defect to fix on its own terms whether or not it is today's
+   * hot line.
+   *
+   * Two subtractions and no allocation, so it is free to read every frame.
+   */
+  get liveHandles(): number {
+    return this.nextSlot - 1 - this.freeSlots.length;
+  }
+
   constructor() {
     this.L = lauxlib.luaL_newstate();
     lualib.luaL_openlibs(this.L);
@@ -167,6 +190,98 @@ export class LuaVM {
       return this.popError(chunkName);
     }
     return { value: this.popValue() };
+  }
+
+  /**
+   * `runExpr`, but running the chunk with a CALLER-SUPPLIED `_ENV` instead of `_G`.
+   *
+   * This is the Lua 5.3 mechanism that replaces 5.1's `setfenv`, and it is what lets a compiled
+   * script handler resolve `this`/`event`/`argN` out of a small table rather than out of `_G` --
+   * see `scripts.ts#callWithBothConventions` for the measurement that made that necessary. A
+   * function defined inside the chunk inherits the chunk's `_ENV`, so setting it on the chunk is
+   * enough to give the returned handler its environment.
+   *
+   * `_ENV` is upvalue 1 of any main chunk, which is why the index below is a literal 1 and not a
+   * search: `luaL_loadbuffer` produces a closure whose only upvalue is `_ENV`.
+   */
+  runExprInEnv(source: string, chunkName: string, env: LuaRef): LuaError | { value: unknown } {
+    const bytes = fengari.to_luastring(source);
+    const loadStatus = lauxlib.luaL_loadbuffer(this.L, bytes, bytes.length, chunkName);
+    if (loadStatus !== lua.LUA_OK) {
+      return this.popError(chunkName);
+    }
+    this.pushRef(env);
+    // Pops the env and installs it as the chunk's `_ENV`. Every chunk `luaL_loadbuffer` produces has
+    // exactly one upvalue and it is `_ENV`, so this cannot miss.
+    lua.lua_setupvalue(this.L, -2, 1);
+    const callStatus = lua.lua_pcall(this.L, 0, 1, 0);
+    if (callStatus !== lua.LUA_OK) {
+      return this.popError(chunkName);
+    }
+    return { value: this.popValue() };
+  }
+
+  /**
+   * Re-points a Lua function's `_ENV` upvalue at `env`. Returns false if it has none.
+   *
+   * A function with no `_ENV` upvalue references no globals at all, so there is nothing to re-point
+   * and false is the ordinary answer rather than a failure. The upvalue is FOUND BY NAME and not
+   * assumed to be index 1: that holds for a main chunk, but a nested function's upvalue order is
+   * whatever the compiler assigned.
+   *
+   * Used on every handler as it is stored (`scripts.ts#setScriptHandler`) so that a handler a
+   * pre-2.0 addon compiled itself resolves `this`/`event`/`argN` the same way one this runtime
+   * compiled does. Re-pointing is behaviour-preserving for everything else, because the environment
+   * chains to `_G` for reads and forwards writes back to it.
+   */
+  setFunctionEnv(fn: LuaRef, env: LuaRef): boolean {
+    this.pushRef(fn);
+    for (let i = 1; ; i += 1) {
+      const name = lua.lua_getupvalue(this.L, -1, i);
+      if (name === null) {
+        lua.lua_pop(this.L, 1);
+        return false;
+      }
+      // `lua_getupvalue` pushed the upvalue's value; drop it either way.
+      lua.lua_pop(this.L, 1);
+      if (fengari.to_jsstring(name) === '_ENV') {
+        this.pushRef(env);
+        lua.lua_setupvalue(this.L, -2, i);
+        lua.lua_pop(this.L, 1);
+        return true;
+      }
+    }
+  }
+
+  /**
+   * RAW read of `table[key]` -- no `__index`, so a miss reads as absent rather than chaining.
+   *
+   * The save half of the legacy-globals save-restore uses this deliberately: it must read what the
+   * environment itself holds, not what `_G` would supply through the chain, or a nested invocation
+   * would "save" an unrelated global and restore it over the outer handler's value.
+   */
+  rawGet(table: LuaRef, key: string): unknown {
+    this.pushRef(table);
+    lua.lua_pushstring(this.L, key);
+    lua.lua_rawget(this.L, -2);
+    const value = this.toJs(-1);
+    lua.lua_pop(this.L, 2);
+    return value;
+  }
+
+  /**
+   * RAW write of `table[key] = value` -- no `__newindex`, so it cannot be forwarded to `_G`.
+   *
+   * This is what keeps the environment's pass-through metamethod free to be an unconditional
+   * forward: the three legacy keys never go through it, so it needs no special-casing and a
+   * handler's ordinary `foo = 1` still lands in `_G`.
+   */
+  rawSet(table: LuaRef, key: string, value: unknown): void {
+    this.pushRef(table);
+    lua.lua_pushstring(this.L, key);
+    this.pushValue(value);
+    lua.lua_rawset(this.L, -3);
+    lua.lua_pop(this.L, 1);
   }
 
   setGlobal(name: string, value: unknown): void {
@@ -435,6 +550,39 @@ export class LuaVM {
   }
 
   /** Releases a slot: see `ref` for why the sentinel is `false` and not nil. */
+/**
+   * **THE GENERAL TRAP, and this is the place someone will find it: NEVER DELETE A KEY FROM A LARGE
+   * `Map` ON A HOT PATH. Overwrite it, or park a sentinel in it.**
+   *
+   * `false` is pushed here rather than nil precisely so no key is deleted, and that choice was
+   * originally made for fengari's sake. It turns out to matter one layer further down as well, and
+   * far more. MEASURED on a bare JS `Map` of N entries with no Lua in the picture, timing one key:
+   *
+   * | entries | set+delete | set+get |
+   * |---------|------------|---------|
+   * |       0 |   0.12 us  | 0.02 us |
+   * |   2,000 |   4.20 us  | 0.02 us |
+   * |   6,000 |  20.43 us  | 0.01 us |
+   * |  12,000 |  40.81 us  | 0.02 us |
+   *
+   * **Overwriting an existing key is flat and free at any size. Deleting one and re-inserting it
+   * makes V8 compact the backing store, which is O(capacity)** -- so a delete/re-insert cycle on a
+   * large map costs proportionally to the WHOLE MAP, every time round.
+   *
+   * That is not a fengari defect and it is not fixed by fengari's own code being O(1): `ltable.js`'s
+   * `mark_dead` (`:141-162`) really is one `Map.delete`, an unlink and a `set` into `dead_strong`,
+   * with no rehash anywhere. The cost is underneath it, in the JS `Map` primitive.
+   *
+   * It has already cost this project real milliseconds once, in a different file: a handler
+   * invocation saves and restores the legacy `this`/`event`/`argN` globals
+   * (`scripts.ts#callWithBothConventions`), the steady state of `this` is nil, and a nil write to a
+   * Lua table IS a delete -- so every invocation inserted a key into `_G` and deleted it again.
+   * At the ~17,000 globals `FrameXML.toc` defines that measured **~239 us per invocation**, against a
+   * `lua_pcall` floor of 1.5 us. See that function for the full arc.
+   *
+   * So: this handle table is the other large `Map` on a hot path in this codebase, and the sentinel
+   * below is what keeps it out of that regime. Do not "tidy" it into a delete.
+   */
   private freeSlot(slot: number): void {
     lua.lua_rawgeti(this.L, lua.LUA_REGISTRYINDEX, this.slotsRef);
     lua.lua_pushboolean(this.L, false);

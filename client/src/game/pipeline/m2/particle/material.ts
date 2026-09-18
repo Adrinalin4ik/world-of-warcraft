@@ -68,6 +68,46 @@ export const applyParticleBlending = (material: any, blendingType: number): void
       material.blendDst = THREE.OneMinusSrcAlphaFactor;
       break;
   }
+
+  // NEVER TOUCH THE FRAMEBUFFER'S ALPHA -- the other half of this function's own promise that
+  // "particles and batches must blend identically", which it did not keep.
+  //
+  // Every RGB pair above already matches `applyBlendingModeToMaterial`
+  // (`m2/material/index.ts:73-131`) mode for mode. What did NOT match is the ALPHA pair: that helper
+  // ends by pinning `blendSrcAlpha = Zero` / `blendDstAlpha = One` for every mode >= 1 (the `d348889`
+  // fix), and this function set neither -- so three.js mirrored each mode's RGB factors into alpha.
+  //
+  // WHY THAT IS VISIBLE, quoting the fix that already exists in the other lane: three requests a
+  // canvas context with `alpha: true` and `premultipliedAlpha: true`, so "the compositor reads our
+  // NON-premultiplied output as premultiplied and adds `(1 - a)` of whatever is behind the canvas --
+  // nothing here, so white. Any fragment that leaves sub-1 alpha in the buffer gets a bright halo."
+  //
+  // WHICH MODES IT ACTUALLY CHANGED, per mode rather than in general -- the framebuffer starts at the
+  // cleared 1.0:
+  //   mode 2 ALPHA       a_dst = a_src^2 + (1 - a_src) * a_dst  -> sub-1. A soft sprite's edge left
+  //                      ~0.84 at a_src 0.2, so every blended particle carried a white fringe.
+  //   mode 5 MODULATE    a_dst = a_dst * a_src + 0              -> driven DOWN hard, the worst case.
+  //   mode 6 MODULATE_2X a_dst = a_dst * a_src + a_src * a_dst  -> sub-1 as well.
+  //   mode 3 ADD         a_dst = a_src^2 + a_src * a_dst        -> rises, clamps at 1. SAFE.
+  //   mode 4 ADD_ALPHA   a_dst = a_src^2 + a_dst                -> rises, clamps at 1. SAFE.
+  //   mode 0 OPAQUE      `NoBlending` ignores these factors entirely, and returns above.
+  //
+  // SO THIS DOES NOT EXPLAIN THE HAND CORONA, and that is stated here rather than discovered later:
+  // all five of `Fire_PreCast_Hand`'s emitters and all four of `Fireball_Missile_Low`'s bar one are
+  // blend **4**, which is in the safe set. This fixes modes 2, 5 and 6 -- a real, game-wide fringe on
+  // every blended and modulating particle -- and leaves the corona question open.
+  //
+  // AND THE CORONA'S SIZE IS AUTHORED, MEASURED: Fireball's precast kit 30 puts
+  // `fire_precast_hand` on BOTH hand slots (0x15 / 0x16) with five emitters at peak full extents
+  // 0.444 / 0.167 / **1.333** / **1.333** / 0.167, and its cast kit 38 puts `fire_cast_hand` on both
+  // with three at **1.344 / 1.961 / 1.961**. A human head is ~0.25-0.30 units on a 2.03-unit body, so
+  // the cast kit alone authors additive sprites SIX TO SEVEN head-widths across, on each hand, at
+  // full alpha mid-life. **The file can produce the owner's reference corona and more**, so no size
+  // multiplier is justified and the deficit is something suppressing those emitters rather than a
+  // number that needs raising. What remains unmeasured is how many of them are LIVE at once, which
+  // needs a running client and not another byte read.
+  material.blendSrcAlpha = THREE.ZeroFactor;
+  material.blendDstAlpha = THREE.OneFactor;
 };
 
 export class ParticleMaterial extends THREE.ShaderMaterial {
@@ -76,6 +116,23 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
 
   private resolvedTexture: THREE.Texture | null = null;
   private disposed = false;
+
+  /**
+   * THE READINESS HANDLE: resolves when this material's texture load has SETTLED, successfully or not.
+   *
+   * It exists because the constructor starts I/O, and a caller that constructs one inside a `.then`
+   * handler otherwise creates a promise nothing can return -- which is what Bluebird reports as
+   * "a promise was created in a handler ... but was not returned from it". `ParticleManager#ready`
+   * aggregates these so its callers can return the chain instead of orphaning it.
+   *
+   * **It NEVER REJECTS, and that is load-bearing rather than lazy.** The two doodad lanes register
+   * from a `.then` with no `.catch` of their own (`world/doodad-manager.js#loadDoodad`,
+   * `pipeline/wmo/index.js#processLoadDoodad`), so a rejecting handle returned into those chains would
+   * turn a missing particle texture into an unhandled rejection -- the exact class of problem this
+   * change is meant to remove. The failure is already reported by the `.catch` below; this handle
+   * answers "has it finished trying", not "did it work".
+   */
+  readonly ready: Promise<void>;
 
   constructor(texturePath: string, blendingType: number) {
     super();
@@ -114,9 +171,37 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
     // particles vanish from half the angles a player can stand at.
     this.side = THREE.DoubleSide;
 
+    // `depthTest` IS DELIBERATELY LEFT AT THREE'S DEFAULT (true), and a depth bias is NOT the answer
+    // to a particle that reads as being behind something it should be in front of.
+    //
+    // The owner reported an effect partly occluded by a rock far behind the character. Worked through
+    // rather than patched: `shader.vert` builds the quad in VIEW space (`viewCenter.xy += spun`), so a
+    // billboard has exactly ONE depth -- its centre's -- and the corner offset cannot perturb it. An
+    // opaque rock is `blendingMode` 0, which leaves `transparent` false and `depthWrite` true
+    // (`m2/material/index.ts:505-519`), so it writes correct depth in the opaque pass and a NEARER
+    // particle passes `depthTest` and draws over it.
+    //
+    // That reasoning pointed at a world-POSITION defect, and **the measurement REFUTED it** -- this
+    // comment previously asserted position as the cause and that assertion was wrong. The owner's
+    // `window.worldSpellFx()` reading gives 1.89, 2.62 and 3.10 units from the player for the live
+    // effects, against a `CULL_DISTANCE` of 120. The particles are exactly where they should be.
+    //
+    // So the occlusion is STILL UNEXPLAINED and is recorded as such rather than papered over: with
+    // correct positions and `depthTest` on, a rock tens of units behind the character cannot occlude a
+    // sprite two units in front of it. One candidate is retired by reading -- there is a single scene
+    // and a single world camera, and the batches sit under `map.particleGroup`, so no second pass with
+    // a foreign projection is involved. A live candidate remains: the owner's screenshot was taken
+    // while Lightning Bolt's MESH models were still being drawn (they carry 116 vertices and no
+    // emitters), and an M2 mesh at `blendingMode >= 1` is transparent with `depthWrite` off and sorts
+    // by its object origin -- which is a known way to get exactly this. If the occlusion recurs now
+    // that those meshes draw again, it is a mesh-material sort question and not a particle one.
+    //
+    // No bias was added either way. `CLAUDE.md`'s record is that every orientation defect here was two
+    // conventions meeting and none was fixed by negating a coordinate.
+
     applyParticleBlending(this, blendingType);
 
-    TextureLoader.load(texturePath)
+    this.ready = TextureLoader.load(texturePath)
       .then((texture) => {
         if (this.disposed) {
           // The material was disposed before the texture arrived: release it immediately rather than
@@ -131,6 +216,7 @@ export class ParticleMaterial extends THREE.ShaderMaterial {
       .catch((error) => {
         console.error(`Failed to load particle texture ${texturePath}:`, error);
       });
+    // `.catch` above returns a resolved promise, so `ready` settles either way -- see its docstring.
   }
 
   dispose() {

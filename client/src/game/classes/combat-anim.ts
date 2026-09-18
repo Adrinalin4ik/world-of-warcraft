@@ -52,6 +52,20 @@ const READY_2H = 27;
 const READY_2HL = 28;
 
 /**
+ * The ranged Load/Hold ids -- `ranged_load_anim`'s outputs and their Hold twins
+ * (`select.rs:585-620`). Every one re-read out of the served `dbfilesclient/animationdata.dbc`
+ * (506 rows) rather than taken on trust: 105 LoadBow, 106 LoadRifle, 112 LoadThrown, 109 HoldBow,
+ * 110 HoldRifle, 111 HoldThrown. The table carries no wand-specific row at all, which is why the
+ * wand borrows the thrown hold.
+ */
+const LOAD_BOW = 105;
+const LOAD_RIFLE = 106;
+const LOAD_THROWN = 112;
+const HOLD_BOW = 109;
+const HOLD_RIFLE = 110;
+const HOLD_THROWN = 111;
+
+/**
  * `VictimState`, the outcome word `SMSG_ATTACKERSTATEUPDATE` carries after its sub-damage block.
  *
  * Values cross-checked against the reference's own two independent uses -- the combat-text picker
@@ -80,6 +94,16 @@ const DODGE = 30;
 const ITEM_CLASS_WEAPON = 2;
 /** `ItemSubclassWeapon::DAGGER`, the one subclass with its own pierce clips. */
 const WEAPON_DAGGER = 0xf;
+
+/**
+ * The ranged `ItemSubclassWeapon` values the ranged idle keys on -- the reference's own match arms
+ * `(2,2)`, `(2,3)`, `(2,18)`, `(2,16)`, `(2,19)` (`select.rs:586-592`), all item class 2.
+ */
+const WEAPON_BOW = 2;
+const WEAPON_GUN = 3;
+const WEAPON_THROWN = 16;
+const WEAPON_CROSSBOW = 18;
+const WEAPON_WAND = 19;
 
 /** entry -> subclass, for weapons only. Empty until `primeItems` resolves. */
 const weaponSubclass = new Map<number, number>();
@@ -166,6 +190,88 @@ export function readyAnimation(unit: Unit): number {
     default:
       return READY_UNARMED;
   }
+}
+
+/**
+ * THE RANGED AUTO-ATTACK IDLE -- `ranged_load_anim` (`select.rs:573-593`, byte-verified there
+ * against the client's `0x5fd460` -> LUT `0x5fd530`), keyed on the RANGED-slot item's subclass.
+ *
+ * Bow -> LoadBow 105 · Gun/Crossbow -> LoadRifle 106 · Thrown -> LoadThrown 112 · **Wand ->
+ * HoldThrown 111** · anything else -> ReadyUnarmed 25.
+ *
+ * THE REFERENCE'S OWN NOTE, TAKEN RATHER THAN OVERRULED: "**Not** ReadyBow/AttackBow: no code in
+ * the client plays those rows." Those two are the obvious-sounding pick -- `AnimationData.dbc`
+ * really does carry ReadyBow 29, AttackBow 46 and FireBow 47, so they look like the answer and are
+ * measurably not it. Nothing here reads them.
+ *
+ * All five keys are item class 2 (`ITEM_CLASS_WEAPON`), so `weaponSubclass` already indexes every
+ * entry this needs and `primeItems` covers it unchanged.
+ *
+ * ## THE CALL SITE IS NOT WIRED, and both of its inputs are absent from this client
+ *
+ * Stated rather than approximated, because inventing the gate would put a drawn-bow pose on a unit
+ * that is not shooting. The reference arms this from `sheath CUR == 2 && [+0xd58] & 0x200`, local
+ * player only (`select.rs:534-539`), placed AFTER the engaged Ready pick -- the two cannot co-occur,
+ * because auto-shot never sets the engaged guid -- and before the chair loops. Here:
+ *
+ *  - **World-side sheath state does not exist.** `UNIT_FIELD_BYTES_2` byte 0 carries it and nothing
+ *    reads it; the only sheath value in the tree is `ui/scene/character-attachments.ts`'s hardcoded
+ *    `1` for the character-select screen.
+ *  - **Auto-repeat armed does not exist either.** It is local state: the client arms it when the
+ *    player casts a spell carrying `AttributesEx2` bit 0x20 and drops it on
+ *    `SMSG_CANCEL_AUTO_REPEAT_SPELL`. Derivable -- the attribute is in `Spell.dbc` -- but a lane of
+ *    its own, not a line here.
+ *
+ * So this is the SELECTOR, complete and testable, with the gate named. Until it is wired the owner
+ * sees no change from it: a mage's wand attack takes its pose from `spell-anim.ts#castAnimationFor`'s
+ * `SpellCastDirected` fallback, and removing THAT is the change filed in that file's header (it would
+ * strip the release clip from 58% of `Spell.dbc`, so it is the owner's call, not a side effect here).
+ */
+export function rangedLoadAnimation(unit: Unit): number {
+  void primeItems();
+  const entry = unit.equippedRanged;
+  const subclass = entry ? weaponSubclass.get(entry) : undefined;
+  switch (subclass) {
+    case WEAPON_BOW:
+      return LOAD_BOW;
+    case WEAPON_GUN: case WEAPON_CROSSBOW:
+      return LOAD_RIFLE;
+    case WEAPON_THROWN:
+      return LOAD_THROWN;
+    case WEAPON_WAND:
+      return HOLD_THROWN;
+    default:
+      return READY_UNARMED;
+  }
+}
+
+/**
+ * Whether `id` is a ranged LOAD clip -- one that must play ONCE AND FREEZE at full draw rather than
+ * loop (`is_ranged_load`, `select.rs:597-600`).
+ *
+ * The wand's HoldThrown 111 is deliberately NOT in the set: it is already a hold pose, so it has
+ * nothing to freeze into and re-arms itself.
+ */
+export function isRangedLoad(id: number): boolean {
+  return id === LOAD_BOW || id === LOAD_RIFLE || id === LOAD_THROWN;
+}
+
+/**
+ * The Hold a finished Load promotes to -- the completion dispatch `0x5fc3f0`'s slot 11/12/15 arms
+ * (`select.rs:602-620`): LoadBow 105 -> HoldBow 109, LoadRifle 106 -> HoldRifle 110, LoadThrown 112
+ * -> HoldThrown 111. Anything else holds nothing and stays put, which `null` says.
+ *
+ * **The promotion is UNCONDITIONAL** (the reference's §5 / decision 1544, stated emphatically there):
+ * the `[+0xd24]` ranged-prop and `[+0xd58] & 0x600` test at `0x5fc5bc` belongs to slot 13 -- the
+ * Hold's OWN re-arm -- not to the Load's slot 11, which is a bare
+ * `mov eax,0x6d ; push eax ; call 0x5fe2f0` at `0x5fc5e9`. Reading that gate onto the Load is named
+ * there as "the mistake that would leave a shooter frozen at full draw", so it is not read onto it.
+ */
+export function rangedHoldFor(loadId: number): number | null {
+  if (loadId === LOAD_BOW) return HOLD_BOW;
+  if (loadId === LOAD_RIFLE) return HOLD_RIFLE;
+  if (loadId === LOAD_THROWN) return HOLD_THROWN;
+  return null;
 }
 
 /**

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 import { Triangle } from './types';
+import { collisionEpoch, matrixElementsEqual, placementHasSettled } from './collision-frame';
 
 const _localBox = new THREE.Box3();
 const _inverse = new THREE.Matrix4();
@@ -18,22 +19,44 @@ const _e2 = new THREE.Vector3();
 interface HullBounds {
   /** A COPY of the 16 elements, not the live array -- the live one mutates under us. */
   matrix: Float64Array;
+  /**
+   * The collision epoch this mesh's world matrix was last refreshed in. See `beginCollisionFrame`.
+   *
+   * `0` means never, which is also the value every entry starts at, so an unrefreshed hull always
+   * refreshes.
+   */
+  refreshedIn: number;
+  /**
+   * **PLACED AND STABLE: stop refreshing this hull's world matrix entirely.** See `hasSettled`.
+   *
+   * Once true the per-frame refresh is skipped for good, which is what takes the last of this
+   * provider's fixed per-cast cost to zero for the static majority.
+   */
+  settled: boolean;
   /** Identity-compared, not value-compared: a geometry swap replaces the object. */
   geometry: THREE.BufferGeometry;
   boundingBox: THREE.Box3;
   box: THREE.Box3;
 }
 
-/** 16 floats, compared exactly. No epsilon: the question is "is this the same matrix", not "is it
- * close" -- a near-equal matrix is a doodad that moved slightly, and its collision must move with
- * it. */
+/**
+ * The collision epoch, the settle test and the exact matrix compare all live in `collision-frame.ts`
+ * now: the WMO provider had the identical per-cast refresh cost and takes the identical fix, so the
+ * mechanism belongs to the collision FRAME rather than to this provider. That module carries the
+ * measurement, the recorded failure the refresh prevents, and why the settle test needs BOTH a
+ * non-zero translation and a stable matrix.
+ *
+ * `beginCollisionFrame` is re-exported here because `Controls#update` and this provider's tests
+ * already import it from this module.
+ */
+export { beginCollisionFrame } from './collision-frame';
+
+function hasSettled(elements: ArrayLike<number>, cached: HullBounds): boolean {
+  return placementHasSettled(elements, cached.matrix);
+}
+
 function matrixEquals(cached: Float64Array, elements: ArrayLike<number>): boolean {
-  for (let i = 0; i < 16; ++i) {
-    if (cached[i] !== elements[i]) {
-      return false;
-    }
-  }
-  return true;
+  return matrixElementsEqual(cached, elements);
 }
 
 /**
@@ -141,6 +164,12 @@ export class DoodadProvider {
 
     const entry = cached ?? {
       matrix: new Float64Array(16),
+      // A FRESH entry is created by the very gather that just refreshed this mesh's matrix, so it is
+      // already current for this epoch. Leaving it at 0 would refresh a second time on the next
+      // gather of the same frame -- correct, but it would give back a quarter of the saving on every
+      // newly streamed doodad.
+      refreshedIn: collisionEpoch(),
+      settled: false,
       geometry,
       boundingBox,
       box: new THREE.Box3(),
@@ -170,14 +199,34 @@ export class DoodadProvider {
       return;
     }
 
-    // Refresh the world matrix from the parent chain before using it.
+    // Refresh the world matrix from the parent chain before using it -- ONCE PER FRAME, not once per
+    // cast. See `beginCollisionFrame` for the measurement that made this the whole of `ctl.move`,
+    // and for why the refresh itself cannot simply be removed.
     //
     // A hull is registered when its M2 is CONSTRUCTED, which happens before the doodad is placed --
     // and the scene root deliberately does not walk static subtrees, so nothing else ever updates
     // it. A stale matrix is the identity, which puts the bounds at the world origin where no query
     // reaches, and the doodad silently never collides at all. Measured: 2528 map doodads loaded,
     // zero triangles gathered.
-    mesh.updateWorldMatrix(true, false);
+    // `collisionEpoch() === 0` means NO FRAME HAS EVER BEEN BEGUN, and then the skip is disabled outright.
+    // **That guard is load-bearing and its absence was a real bug**: a fresh entry is stamped with
+    // the current epoch, so at epoch 0 it compared equal and the refresh was skipped for ever --
+    // which `__tests__/doodad-provider.test.ts`'s "re-gathers a placement that moves after its
+    // bounds were already cached" caught immediately, gathering 12 triangles at a position the
+    // doodad had left. Every collision unit test runs at epoch 0 and therefore keeps the exact
+    // pre-change behaviour; only the app, which calls `beginCollisionFrame`, takes the saving.
+    if (cached === null || collisionEpoch() === 0 || (!cached.settled && cached.refreshedIn !== collisionEpoch())) {
+      mesh.updateWorldMatrix(true, false);
+      if (cached !== null) {
+        cached.refreshedIn = collisionEpoch();
+        // LATCH once the placement is provably done -- see `hasSettled`. Checked AFTER the refresh
+        // and BEFORE `worldBoundsOf`, because the comparison it needs is "did this refresh change
+        // anything", and `worldBoundsOf` overwrites the cached matrix.
+        if (collisionEpoch() !== 0 && hasSettled(mesh.matrixWorld.elements, cached)) {
+          cached.settled = true;
+        }
+      }
+    }
 
     const bounds = this.worldBoundsOf(mesh, geometry, cached);
     if (bounds === null || !bounds.box.intersectsBox(worldBox)) {

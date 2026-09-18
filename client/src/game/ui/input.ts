@@ -21,6 +21,7 @@ import { keyToken } from './framexml/bindings';
 import {
   focusChain, hitTest, hyperlinkAt, nextFocus, paneAt, sliderThumbAt, wheelTargetAt,
 } from './hit';
+import { linkRunEndingAt } from './markup';
 import { layoutRectOf } from './rects';
 import { viewportUnits } from './layout';
 import { DrawItem, MouseButtonName, Widget } from './widget';
@@ -524,7 +525,33 @@ export class GlueInput {
 
     this.pressHit = hit;
 
-    this.setFocus(hit && hit.focusable ? hit : null);
+    /**
+     * A CLICK ELSEWHERE DOES NOT TAKE THE KEYBOARD AWAY FROM AN EDIT BOX.
+     *
+     * The owner: shift-clicking a bag item to link it "снимается фокус с поля ввода и оно пропадает =
+     * ничего не линкуется". Both halves were this one line, which used to clear the focus on ANY press
+     * that did not land on something focusable:
+     *
+     *  - the field VANISHED because losing focus fires `OnEditFocusLost` ->
+     *    `ChatEdit_DeactivateChat` -> `ChatEdit_SetDeactivated`, whose whole body hides or dims the box
+     *    (`chatframe.lua:3411-3428`);
+     *  - and nothing LINKED because `ChatEdit_InsertLink` inserts only into
+     *    `ChatEdit_GetActiveWindow()` (`:3490-3495`), which by then was nil -- so it fell through to
+     *    the auction and macro branches and returned false.
+     *
+     * THE ENGINE MOVES KEYBOARD FOCUS ONLY ON PURPOSE: a click INTO an edit box, an explicit
+     * `SetFocus`/`ClearFocus`, Escape, or Tab. A press on a Button is not one of those, and the whole
+     * shift-to-link gesture is built on that -- you keep typing, click an item, and the link arrives in
+     * the sentence you were writing. Clearing here made every such gesture impossible rather than
+     * merely awkward.
+     *
+     * So focus MOVES to a focusable hit and is otherwise LEFT ALONE. Escape still clears it
+     * (`onKeyDown`'s focused branch) and so does the client's own `ClearFocus`, which are the routes
+     * that are supposed to.
+     */
+    if (hit && hit.focusable) {
+      this.setFocus(hit);
+    }
 
     // A PRESS ON A MODEL PANE. `paneAt` owns the z-order decision -- it answers null when anything
     // scriptable is on top, which is what keeps the two rotate buttons inside the pane's own rect
@@ -938,7 +965,19 @@ export class GlueInput {
      * `OSX`, so a Mac user reaches this code.
      */
     if ((event.ctrlKey || event.metaKey) && !event.altKey) {
-      const chord = event.key.toLowerCase();
+      /**
+       * **`event.code`, NOT `event.key`, AND THAT IS WHY CTRL+A DID NOTHING.**
+       *
+       * The owner types Russian, and `event.key` is the CHARACTER the layout produces: on a Cyrillic
+       * layout Ctrl+A arrives as `"ф"`, so a comparison against `"a"` never matched and the chord fell
+       * through to the browser. `event.code` is the physical key and is layout-independent --
+       * `KeyA` whatever is printed on it.
+       *
+       * `framexml/bindings.ts#baseToken` already made this choice for the binding table and records
+       * the same reasoning ("`code` is layout-position and stable under modifiers, which is the same
+       * property the client's own scan codes have"). This block predated it and kept the older read.
+       */
+      const chord = /^Key([A-Z])$/.exec(event.code)?.[1]?.toLowerCase() ?? null;
       if (chord === 'a') {
         // The client's own `HighlightText()` with no arguments: anchor at 0, caret at the end
         // (`lua/methods/kinds.ts#HighlightText`). Written directly rather than by calling into the Lua
@@ -985,8 +1024,20 @@ export class GlueInput {
       if (this.hasSelection(target)) {
         this.deleteSelection(target);
       } else if (target.caret > 0) {
-        target.text = target.text.slice(0, target.caret - 1) + target.text.slice(target.caret);
-        target.caret -= 1;
+        /**
+         * A WHOLE HYPERLINK GOES IN ONE PRESS. See `markup.ts#linkRunEndingAt`.
+         *
+         * Per-character deletion ate the closing `|h` first, which left a malformed escape the parser
+         * could no longer hide -- so the item id surfaced in the field, which is exactly what the
+         * owner reported. A link is one character to an editor, and the engine treats it as one.
+         *
+         * The range test runs only when the caret is preceded by `|h` or `|r`, so an ordinary
+         * Backspace pays two `slice` comparisons and nothing else.
+         */
+        const run = linkRunEndingAt(target.text, target.caret);
+        const from = run === null ? target.caret - 1 : run.start;
+        target.text = target.text.slice(0, from) + target.text.slice(target.caret);
+        target.caret = from;
         target.selectionAnchor = target.caret;
       }
     } else if (event.key === 'Delete') {

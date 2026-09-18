@@ -1,3 +1,4 @@
+import { beginSection, endSection } from '../../../perf/anim-section';
 import * as THREE from 'three';
 import MapLight from '../../../world/light/MapLight';
 import { CloudFrame, CloudKernel, Vec3Like, occ1Sun, occ1Moon } from '../../../world/sky/clouds/kernel';
@@ -248,6 +249,20 @@ class SkyManager {
   public update(camera: THREE.Camera, mapID: number, dt: number = 0): void {
     if (!this.isEnabled) return;
 
+    /**
+     * **FIVE SPANS, EXHAUSTIVE OF `w.sky`, for the reason this codebase already learned once.**
+     *
+     * `w.sky` measured **2.3 ms** on the owner's panel while he walked the abbey stairs and **0.1 ms**
+     * standing still elsewhere. The sky cannot depend on a staircase, so one of the six things below
+     * depends on the CAMERA MOVING -- and from outside there is no way to say which, exactly as
+     * `world.animate` was unreadable until Task 9 split it into seven ("five samples of one unchanged
+     * build spanned 7.3-15.5 ms").
+     *
+     * Deliberately exhaustive, like those seven: every statement of this update sits inside exactly
+     * one span, so their sum reconstructs `w.sky` to within the timestamp overhead. If a statement is
+     * ever added outside all five, the sum stops matching and that is the intended tell.
+     */
+    beginSection('sky.dome');
     if (this.currentMethod === 'cone' && this.skyCone) {
       this.skyCone.update(camera, mapID);
     } else if (this.currentMethod === 'procedural' && this.proceduralSky) {
@@ -255,14 +270,25 @@ class SkyManager {
     } else if (this.currentMethod === 'skybox' && this.skybox) {
       this.skybox.update(camera, mapID);
     }
+    endSection('sky.dome');
 
+    beginSection('sky.clouds');
     this.updateClouds(camera, dt);
+    endSection('sky.clouds');
+
+    beginSection('sky.celestial');
     this.updateCelestialBodies(camera, dt);
+    endSection('sky.celestial');
 
     // Task 6 Steps 1-2: resolve/build whichever skybox this frame wants. Both are no-ops (stay
     // invisible) when neither the zone nor any WMO names one active right now.
+    beginSection('sky.zonebox');
     this.zoneSkybox.update(camera, mapID);
+    endSection('sky.zonebox');
+
+    beginSection('sky.wmobox');
     this.wmoSkybox.update(camera, this.wmoManagerRef);
+    endSection('sky.wmobox');
 
     // The two backdrops are MUTUALLY EXCLUSIVE, and the WMO one wins. A zone can name a
     // `LightSkybox` while the camera also stands somewhere whose portal flood reaches a group asking
@@ -366,6 +392,30 @@ class SkyManager {
    * active, same as `MapLight` itself.
    */
   private updateClouds(camera: THREE.Camera, dt: number): void {
+    /**
+     * **A FIELD NOBODY CAN SEE IS NOT SIMULATED. Measured: `sky.clouds` 2.4 ms with the owner stood
+     * INSIDE the abbey and `visibleChunks` at zero.**
+     *
+     * The dome lives in `celestialGroup`, and `updateSkyboxSuppression` is the only thing that touches
+     * that group's `.visible` -- so with a WMO skybox active the dome is not drawn at all, while the
+     * coverage field went on ticking and uploading its texture every frame. That was the whole of
+     * `w.sky` indoors (2.4 of 2.4), and the five spans added a commit earlier are what made it
+     * attributable rather than a mystery inside one number.
+     *
+     * `cloudPrimed` is cleared on the way out, so the first visible frame takes the REBUILD path
+     * rather than a scroll: after an arbitrary gap the field has no continuity to preserve, and the
+     * init-vs-scroll distinction already exists for exactly that reason (a zone change). Nothing can
+     * jump, because nothing was on screen to jump from.
+     *
+     * ONE FRAME OF LAG, stated: `updateSkyboxSuppression` runs at the END of `update`, so the flag
+     * read here is the previous frame's. That is right rather than merely tolerable -- the frame the
+     * dome becomes visible is the frame the rebuild runs, and a rebuild is what that frame needs.
+     */
+    if (!this.celestialGroup.visible) {
+      this.cloudPrimed = false;
+      return;
+    }
+
     // Camera-follow runs every frame independent of whether the field itself changed.
     this.cloudDome.update(camera);
 

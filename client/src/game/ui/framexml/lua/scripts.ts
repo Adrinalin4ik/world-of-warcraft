@@ -185,6 +185,110 @@ function checkHandlerName(name: string, where: string): void {
  *
  * A `WeakMap` on the VM, so a disposed runtime's whole store goes with it and nothing here pins a VM.
  */
+/**
+ * **HOW MANY TIMES DID WE ENTER LUA THIS FRAME?** -- the integer that closes, or refuses to close, a
+ * 10x gap.
+ *
+ * The owner's census reports `actionButtons 8` and `actionButtonMs 1.91`, which reads as 237 us to
+ * service one button. The harness prices one invocation of a realistic handler at 23.11 us
+ * (`__bench__/script-call.test.ts`), so 8 x 23.11 us = 0.18 ms -- a **10x** shortfall against 1.91.
+ *
+ * `actionButtons` counts BUTTONS, not invocations, and those are not the same number: a handler body
+ * that calls a client function which fires another frame's handler enters Lua again, and the tick's
+ * outer loop cannot see it. So either the real invocation count is many times eight -- in which case
+ * the per-call price is right and the count was the error -- or it is eight and the live VM's
+ * per-call cost genuinely exceeds the harness's. **One counter separates those, and no amount of
+ * reading does.**
+ *
+ * Counted in `invokeScriptHandler`, which `scripts.ts:346-350` already documents as the ONE
+ * invocation entry point -- so this is a complete count by construction rather than by a survey of
+ * call sites. Incremented only when a handler actually exists and will be called, because a miss
+ * costs a `Map` lookup and is not an entry into Lua.
+ *
+ * One integer add on a path already doing a `pcall` and nine global round-trips.
+ */
+/**
+ * **THE SHARED LEGACY-GLOBALS ENVIRONMENT: where `this`/`event`/`argN` actually live.**
+ *
+ * ## Why this is not `_G`, and why that is a DELIBERATE DEVIATION FROM THE REFERENCE
+ *
+ * The reference keeps them in `_G` and saves/restores them there
+ * (`samples/benilla/crates/benilla-ui/src/script/event.rs:264-306`). **This runtime keeps them in a
+ * three-entry table that chains to `_G`, and the observable behaviour is identical.** The deviation
+ * is in the mechanism only, and it exists because the two runtimes have different table
+ * implementations:
+ *
+ *  - the steady state of `this` is nil, and a nil write to a Lua table IS a delete;
+ *  - so every invocation inserted a key into `_G` and deleted it again;
+ *  - under mlua's C Lua that is amortised O(1) and the reference pays nothing;
+ *  - under fengari a table is a JS `Map`, and **V8 compacts the backing store on
+ *    delete-then-reinsert, which is O(capacity)** -- MEASURED at **40.81 us at 12,000 entries
+ *    against 0.02 us for an overwrite** (`vm.ts#freeSlot` carries the full table).
+ *
+ * At the ~17,000 globals `FrameXML.toc` defines that was **~239 us per handler invocation** against
+ * a `lua_pcall` floor of 1.5 us -- about 1.9 ms a frame on the action bar alone. Writing into a
+ * three-entry table instead is O(1) and deletes nothing from `_G`.
+ *
+ * **DO NOT "RESTORE FIDELITY" BY MOVING THESE BACK INTO `_G`.** That is not a fidelity improvement;
+ * it is a 1.6 ms regression, and the reference's own structure -- save, set, call, restore, even on
+ * error -- is preserved here exactly. Only the table changes.
+ *
+ * ## Shape
+ *
+ * ONE table for the whole VM, not one per handler. `argN` from a nested call is visible to the outer
+ * body TODAY, through `_G`, so a shared table preserves that rather than changing it; per-handler
+ * would buy an isolation nobody currently has and cost an allocation per registration.
+ *
+ * `__index = _G` is a TABLE and not a function, so a global the handler reads and the environment
+ * does not hold resolves by a raw get. Measured, 10 global reads per call at a 12,000-entry `_G`:
+ * plain `_ENV = _G` 4.09-4.20 us, chained 3.60-3.73 us -- the chain is **faster**, 4/4 runs, with a
+ * within-arm spread of ~0.1 us. The miss path costs nothing.
+ *
+ * `__newindex` forwards **everything** to `_G`, unconditionally, so a handler's ordinary `foo = 1`
+ * still becomes a real global that the rest of the client can see. It needs no special case for the
+ * three legacy keys because the save-restore below writes them with `rawSet`, which does not trigger
+ * metamethods -- so they never reach the forward at all.
+ *
+ * ## The one behaviour that does change, named rather than hidden
+ *
+ * A handler function that this runtime did NOT compile -- one a pre-2.0 addon defines itself and
+ * installs with `SetScript` -- keeps `_ENV = _G` and will read `this` as nil where today it would
+ * read the frame. **Nothing in 3.3.5a's own Lua is affected, and that was checked rather than
+ * assumed**: every occurrence of `this` and `argN` across `uiparent.lua` (15 + 51),
+ * `chatframe.lua` (10 + 114), `actionbutton.lua`, `unitframe.lua`, `containerframe.lua`,
+ * `questframe.lua` and `buffframe.lua` is either a COMMENT or a LOCAL (`local arg1, arg2 = ...;`).
+ * This build's handlers all take `(self, event, ...)`. The legacy globals exist for pre-2.0 addons,
+ * and none are loaded.
+ *
+ * GAP, for when one is: such an addon needs its handler compiled in this environment, which means
+ * routing `SetScript`'s function through `lua_setupvalue`. Not done speculatively -- it should be
+ * decided with a real caller in front of us.
+ *
+ * `getfenv`/`setfenv` remain absent, as they were before this change: fengari is 5.3 and
+ * `compat.ts:5` already records that nothing in the loaded glue calls them. A pre-2.0 addon calling
+ * either is broken today, independently of this.
+ */
+const legacyEnvs = new WeakMap<LuaVM, LuaRef>();
+
+/** The VM's legacy-globals environment, created on first use. */
+function legacyEnv(vm: LuaVM): LuaRef {
+  const existing = legacyEnvs.get(vm);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const built = vm.runExpr(
+    'return setmetatable({}, { __index = _G, __newindex = function(t, k, v) _G[k] = v end })',
+    '=legacy-globals-env',
+  );
+  if ('message' in built || !vm.isRef(built.value)) {
+    throw new Error('LuaVM: could not create the legacy-globals environment');
+  }
+  legacyEnvs.set(vm, built.value);
+  return built.value;
+}
+
+export const invokeCensus = { calls: 0 };
+
 const handlerStores = new WeakMap<LuaVM, Map<number, Map<string, LuaRef>>>();
 
 /** `vm`'s own frame-id -> handler-name -> handle store, created on first use. */
@@ -235,6 +339,16 @@ export function setScriptHandler(vm: LuaVM, self: number, name: string, handler:
     byName = new Map();
     store.set(self, byName);
   }
+  // **THE ONE DOOR, AND THEREFORE WHERE THE ENVIRONMENT IS INSTALLED.** This function's own comment
+  // already records that `SetScript` is the single route a handler enters by -- the XML loader goes
+  // through the Lua method, and so does every line of the client's own Lua. So re-pointing `_ENV`
+  // here covers a handler a pre-2.0 addon compiled ITSELF, which `compileScriptHandler`'s in-env
+  // load cannot reach. Without it such a handler reads `this` as nil, which is exactly what the two
+  // legacy-convention tests in `__tests__/scripts.test.ts` caught.
+  //
+  // Idempotent, and free for a handler that references no globals (it has no `_ENV` upvalue and the
+  // call returns false). See `legacyEnv` for why the environment is not `_G`.
+  vm.setFunctionEnv(handler, legacyEnv(vm));
   byName.set(name, handler);
 }
 
@@ -279,7 +393,9 @@ export function compileScriptHandler(
   const named = SCRIPT_PARAMS.get(handlerName) ?? [];
   const parameters = ['self', ...named, '...'].join(', ');
   const source = `return function(${parameters})\n${body}\nend`;
-  const result = vm.runExpr(source, chunkName);
+  // IN THE LEGACY ENVIRONMENT, not `_G` -- see `legacyEnv`. A function defined inside the chunk
+  // inherits the chunk's `_ENV`, so this is what makes the returned handler resolve `this`.
+  const result = vm.runExprInEnv(source, chunkName, legacyEnv(vm));
   if ('message' in result) {
     console.warn(`${chunkName}: failed to compile: ${result.message}`);
     return null;
@@ -324,21 +440,196 @@ export function drainScriptErrors(): string[] {
  * a handler that itself fires another handler (directly, or via `invokeScriptHandler` again) must see
  * its own `this`/`event`/`argN` again once the nested call returns.
  */
+/**
+ * **THIS FUNCTION IS O(THE SIZE OF THE GLOBALS TABLE), AND THAT IS THE WHOLE OF `actionButtonMs`.**
+ *
+ * MEASURED (`__bench__/script-call.test.ts`), one VM, one handler, growing only `_G`:
+ *
+ * | globals | per invocation |
+ * |---------|----------------|
+ * |       0 |      18.74 us  |
+ * |   2,000 |      34.21 us  |
+ * |   6,000 |      93.86 us  |
+ * |  12,000 |     175.29 us  |
+ *
+ * Linear, at about **13 us per thousand globals**, against a `vm.call` floor of **1.5-2.4 us**. So a
+ * handler invocation in a bare harness costs ~20 us and the same invocation with `FrameXML.toc`
+ * loaded costs an order of magnitude more -- which is exactly the 10x that survived a correct
+ * per-call measurement, and it is why the harness structurally under-reports this path.
+ *
+ * ## The mechanism, corrected -- an earlier version of this comment named the wrong layer
+ *
+ * It is the nine `lua_getglobal`/`lua_setglobal` round-trips below (`this`, `event` and `arg1` each
+ * saved, set and restored), and specifically the **nil** ones. That much is measured three ways:
+ *
+ *  - at a FIXED 12,000-entry `_G`, cost scales with the round-trip count: **0 trips 2.29 us,
+ *    3 trips 8.37 us, 9 trips 19.91 us**. So the write path is the multiplier, not the environment.
+ *  - a plain get+set pair is **size-INDEPENDENT**: 4.52 us at a bare `_G`, 4.32 us at 12,000.
+ *  - a set followed by a NIL set is not: **6.60 us bare, 75.25 us at 12,000**, an 11x.
+ *
+ * `vm.ts#ref` records that writing nil to a fengari key DELETES it, and that is true -- but the
+ * earlier claim here that the next insert then "rehashes the whole thing" inside fengari is **wrong
+ * and is withdrawn**. `luaH_setfrom` (`node_modules/fengari/src/ltable.js:209-212`) calls
+ * `mark_dead`, and `mark_dead` (`:141-162`) is one `Map.delete`, a linked-list unlink and a `set`
+ * into `dead_strong` -- O(1), no rehash. `add` (`:118`) does open with `dead_strong.clear()`, but
+ * that map only holds keys killed since the last insert, which here is at most three.
+ *
+ * The linear term is one layer further down, in **V8's `Map`**, and it was isolated with no Lua in
+ * the picture at all -- a bare JS `Map` of N entries, timing one key:
+ *
+ * | entries | set+delete | set+get |
+ * |---------|------------|---------|
+ * |       0 |   0.12 us  | 0.02 us |
+ * |   2,000 |   4.20 us  | 0.02 us |
+ * |   6,000 |  20.43 us  | 0.01 us |
+ * |  12,000 |  40.81 us  | 0.02 us |
+ *
+ * Overwriting an existing key is flat; **deleting and re-inserting one forces V8 to compact the
+ * backing store, which is O(capacity)**. So the cost is not that fengari rehashes -- it is that the
+ * delete/re-insert CYCLE makes V8 rehash, repeatedly, on a table the size of `_G`.
+ *
+ * The steady state of `this` is nil, so every invocation inserts the key and the restore deletes it
+ * again: one full churn per legacy global per call, on a 17,000-entry `_G`. Three of them is the
+ * ~239 us the owner measures.
+ *
+ * It also explains what the leak fix did not: `ui.tick` reading 1.6, 3.4, 4.8, 5.6, 6.6, 9.7 ms
+ * across the owner's samples. That is not a leak and not "state" -- **the globals table GROWS as the
+ * manifest and its panels initialise**, and every handler invocation in the client gets more
+ * expensive as it does.
+ *
+ * **THE FIX THEREFORE IS TO STOP DELETING KEYS FROM `_G`, not to reduce the round-trip count.** An
+ * overwrite is already free; only the nil write is not.
+ *
+ * ## What is NOT available: "delete once per outermost invocation instead of once per call"
+ *
+ * It sounds like it should divide the cost by the number of invocations, and it does nothing,
+ * because **this function already behaves that way and gets it for free.** The restore writes back
+ * the SAVED value. A nested invocation saves the enclosing handler's wrapper, which is non-nil, so
+ * its restore is an overwrite and never a delete; only an invocation whose saved value was nil --
+ * the outermost one -- deletes. A depth counter would gate a case that is already gated.
+ *
+ * MEASURED, eight entries into Lua at a fixed 12,000-entry `_G`
+ * (`__bench__/script-call.test.ts`):
+ *
+ *  - eight SEQUENTIAL top-level invocations: 1245.7 us, **155.7 us each**
+ *  - one top-level invocation NESTING seven:  289.7 us, **36.2 us each**
+ *
+ * 4.3x cheaper per entry, which is the deferral already working. The tick's eight action buttons are
+ * eight sequential top-level invocations, not a nest -- there is no enclosing invocation to defer
+ * into, so each is outermost and each deletes, and no depth counter can merge them.
+ *
+ * ## Not clearing at all is settled AGAINST, by the reference
+ *
+ * `benilla-ui/src/script/event.rs:264-306` restores the SAVED value, which at the outermost
+ * invocation is nil -- so **the reference clears too**. Leaving the legacy globals set between
+ * top-level invocations is not a faithful port waiting on a fact about 3.3.5a; it is a deviation
+ * from the only authority we have on mechanism. That also closes the per-frame-flush variant, whose
+ * failure mode when someone forgets the hook is exactly that deviation, reached by accident.
+ *
+ * ## THE FIX THAT IS LEFT, and it is measured: give the handler its own ENVIRONMENT
+ *
+ * The three legacy names do not have to live in `_G` at all. This is fengari (Lua 5.3), so a handler
+ * compiled through `load(chunk, name, mode, env)` carries its own `_ENV` upvalue: a three-entry
+ * table holding `this`/`event`/`argN` and chaining to `_G` via `__index`. The saves and sets then
+ * write into a table with three keys -- **O(1), and no key is ever deleted from `_G`** -- while
+ * `this` still resolves inside the handler exactly as today. The save-restore structure the
+ * reference requires is untouched; only the table it writes to changes.
+ *
+ * The objection to doing this on `_G` itself was that `__index` would fire on every absent-global
+ * read in the game. Confined to handler BODIES that population is small, and MEASURED it costs
+ * nothing at all -- 10 global reads per call against a 12,000-entry `_G`, four runs:
+ *
+ *  - plain `_ENV = _G`:        4.09 - 4.20 us/call
+ *  - chained 3-entry `_ENV`:   3.60 - 3.73 us/call
+ *
+ * The chained environment is consistently **FASTER**, by ~0.45 us per call, in the same direction
+ * 4/4 with a within-arm spread of ~0.1 us. `__index = _G` is a table rather than a function, so the
+ * miss resolves by a raw get and the three-entry probe that precedes it is free.
+ *
+ * The hazard is a WRITE, not a read: a handler assigning a new global would land in the environment
+ * table and vanish from everyone else's view. A `__newindex` pass-through fixes it and is asserted
+ * in the bench rather than assumed (`BenchWroteThrough` reaches `_G`).
+ *
+ * ## BUILT, and the measured result
+ *
+ * The globals-size curve was the defect and is now nearly flat -- same arm, same VM, growing only
+ * `_G`:
+ *
+ * | globals | before  | after   |
+ * |---------|---------|---------|
+ * |       0 |  15.37  |  13.74  |
+ * |   2,000 |  32.71  |  13.58  |
+ * |   6,000 |  89.97  |  14.23  |
+ * |  12,000 | 184.36  |  20.53  |
+ *
+ * **9x at 12,000 globals**, and eight sequential top-level invocations went **1245.7 us -> 157.6 us**
+ * (155.7 -> 19.7 us each). The residual rise from 13.74 to 20.53 is the environment's `__index` chain
+ * plus whatever else scales with `_G`, and it is 1/24th of what it replaced.
+ *
+ * The gates are in `__bench__/script-call.test.ts` (the curve must stay within 3x across the range,
+ * which stands in for a delete counter) and in `__tests__/scripts.test.ts` (the legacy convention
+ * through a real handler body, and a nested throw restoring all three keys to nil).
+ *
+ * **DO NOT "FIX" THIS BY DROPPING THE SAVE-RESTORE.** The reference does exactly what this does and
+ * says why: `samples/benilla/crates/benilla-ui/src/script/event.rs:264-306`,
+ * "saving and restoring the globals around the call (even on error) so nested handler firing is
+ * safe". Under mlua's real C Lua those writes are amortised O(1), so the reference pays nothing for
+ * a structure that costs us everything. The structure is right; the global writes are the defect,
+ * and the fix belongs in how `LuaVM` reaches a global -- not here.
+ */
 function callWithBothConventions(vm: LuaVM, handler: LuaRef, selfValue: unknown, args: unknown[]): LuaError | null {
-  const previousThis = vm.getGlobal('this');
-  const previousEvent = vm.getGlobal('event');
-  const previousArgs = args.map((_, index) => vm.getGlobal(`arg${index + 1}`));
+  const env = legacyEnv(vm);
+  // RAW, both directions -- see `legacyEnv`. A raw read saves what the environment itself holds
+  // rather than what `_G` would supply through the `__index` chain, and a raw write cannot be
+  // forwarded to `_G` by `__newindex`.
+  const previousThis = vm.rawGet(env, 'this');
+  const previousEvent = vm.rawGet(env, 'event');
+  const previousArgs = args.map((_, index) => vm.rawGet(env, `arg${index + 1}`));
 
-  vm.setGlobal('this', selfValue);
-  vm.setGlobal('event', args[0]);
-  args.forEach((arg, index) => vm.setGlobal(`arg${index + 1}`, arg));
+  vm.rawSet(env, 'this', selfValue);
+  vm.rawSet(env, 'event', args[0]);
+  args.forEach((arg, index) => vm.rawSet(env, `arg${index + 1}`, arg));
 
   try {
     return vm.call(handler, [selfValue, ...args]);
   } finally {
-    vm.setGlobal('this', previousThis);
-    vm.setGlobal('event', previousEvent);
-    previousArgs.forEach((value, index) => vm.setGlobal(`arg${index + 1}`, value));
+    // The ERROR PATH matters more now than it did: the environment is SHARED, so a throw that
+    // unwound without restoring would leak one handler's `this` into the next. Same `finally`, same
+    // order, same values -- only the table is different.
+    vm.rawSet(env, 'this', previousThis);
+    vm.rawSet(env, 'event', previousEvent);
+    previousArgs.forEach((value, index) => vm.rawSet(env, `arg${index + 1}`, value));
+
+    // **RELEASE THE SAVED HANDLES.** `getGlobal` goes through `toJs`, whose default branch mints a
+    // registry slot for anything with no JS shape -- a table or a function (`vm.ts#toJs`) -- and only
+    // an explicit `unref` gives it back. Nothing here released them, so every invocation that found a
+    // TABLE in `this` leaked one slot, for ever.
+    //
+    // MEASURED at exactly **1.00 handle per call** (`__bench__/script-call.test.ts`), and `this` holds
+    // a table on any NESTED invocation, which is the ordinary case: an outer handler sets `this` to
+    // its own wrapper before calling a client function that fires another frame's handler. At the
+    // per-frame tick's rate that is a leak at frame rate.
+    //
+    // AFTER the `setGlobal`s, never before: `setGlobal` pushes the value and stores it in the Lua
+    // globals table, so Lua holds its own reference by then and freeing our slot cannot collect a
+    // value the global still names.
+    //
+    // Why this matters beyond memory: slot allocation is O(1) here by design (`vm.ts#ref` exists
+    // precisely because `luaL_ref` is O(live handles)), so a leak is not automatically slow -- but it
+    // grows the fengari-side handle table without bound, and a growing handle table is what once
+    // froze this interface for 10.1 s. `LuaVM#liveHandles` is censused so a regression is visible
+    // rather than inferred.
+    releaseSaved(vm, previousThis);
+    releaseSaved(vm, previousEvent);
+    previousArgs.forEach((value) => releaseSaved(vm, value));
+  }
+}
+
+/** Frees a handle `getGlobal` minted for a table- or function-valued global. A no-op for the
+ * scalars, which `toJs` maps to plain JS values and which own no slot. */
+function releaseSaved(vm: LuaVM, value: unknown): void {
+  if (vm.isRef(value)) {
+    vm.unref(value);
   }
 }
 
@@ -358,6 +649,7 @@ export function invokeScriptHandler(
   if (handler === null) {
     return null;
   }
+  invokeCensus.calls += 1;
   return callWithBothConventions(ctx.vm, handler, ctx.wrapper(self), args);
 }
 

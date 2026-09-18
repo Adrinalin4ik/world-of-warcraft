@@ -1,6 +1,7 @@
 import EventEmitter from 'events';
 import { CombatHandler } from './combat';
 import { AuraHandler } from './auras';
+import { AuraVisualHandler } from './aura-visuals';
 import { CombatLogHandler } from './combat-log';
 import { GameHandler } from '../handler';
 import { ItemHandler } from './items';
@@ -10,6 +11,7 @@ import { MerchantHandler } from './merchant';
 import { ReputationHandler } from './reputation';
 import GameObjectHandler from './game-object';
 import { QuestHandler } from './quest';
+import { ChannelHandler } from './channel';
 import { LevelUpHandler } from './level-up';
 import { GroupHandler } from './group';
 import { ChatMessageHandler } from './chat';
@@ -130,6 +132,14 @@ export class ObjectHandler extends EventEmitter {
    */
   public questHandler: QuestHandler;
 
+  /**
+   * CHAT CHANNELS -- the join/leave pair and `SMSG_CHANNEL_NOTIFY`, which had no subscriber at all.
+   *
+   * Membership is confirmed by the server rather than assumed from the send; see `channel.ts` for why
+   * that is the design and not caution.
+   */
+  public channelHandler: ChannelHandler;
+
   /** World objects: the template name query, and `CMSG_GAMEOBJ_USE`. See `game-object.ts`. */
   public gameObjectHandler: GameObjectHandler;
 
@@ -146,6 +156,22 @@ export class ObjectHandler extends EventEmitter {
    * all. See `auras.ts`' header for the version difference.
    */
   public auraHandler: AuraHandler;
+
+  /**
+   * THE BUFF's own visual -- the owner's "попробовал забафать себя, щитом мага и не увидел
+   * визуального эффекта".
+   *
+   * A buff's visual is not a cast flash and is not driven by `SMSG_SPELL_GO`: it is the spell's STATE
+   * kit, armed while the spell id sits in the unit's aura slots. Every part of that chain already
+   * existed -- the aura feed, the kit resolver, the persistent-instance spawner -- and nothing
+   * subscribed the one to the other. This is that subscription; `game/classes/aura-visual.ts` carries
+   * the mechanism, the measurements and the named gaps.
+   *
+   * PUBLIC for the same reason the movement handlers are: `auraVisualHandler.kits.stats` and
+   * `.applied` are how a probe tells "the buff has no visual in the data" from "the visual was
+   * refused" from "the model was spawned".
+   */
+  public auraVisualHandler: AuraVisualHandler;
 
   // Creates a new character handler
   constructor(gameHandler: GameHandler) {
@@ -172,6 +198,10 @@ export class ObjectHandler extends EventEmitter {
     // QUESTS. The whole `SMSG_QUESTGIVER_*` family had no subscriber until this line, which is what
     // `gossip-bridge.ts:231` recorded as the reason `SelectGossipAvailableQuest` was a declared gap.
     this.questHandler = new QuestHandler(this.game);
+    // CHANNELS. `SMSG_CHANNEL_NOTIFY` had no subscriber, so `GetChannelList` could only ever be empty
+    // and no chat frame was registered for a channel -- which drops incoming channel messages as well
+    // as making outgoing ones unaddressable.
+    this.channelHandler = new ChannelHandler(this.game);
     this.gameObjectHandler = new GameObjectHandler(this.game);
     // LEVELLING UP. `SMSG_LEVELUP_INFO` (0x1D4) likewise had no subscriber, so `PLAYER_LEVEL_UP` was
     // never fired and the client's own congratulation lines never printed.
@@ -179,6 +209,8 @@ export class ObjectHandler extends EventEmitter {
     // AURAS. The pair had no subscriber, so every buff and debuff the server sent was framed, emitted
     // and dropped -- the owner's "ауры и бафы с дебафами не отображаются".
     this.auraHandler = new AuraHandler(this.game);
+    // AFTER `auraHandler`, because it subscribes to it. The buff's own visual: see the field's docs.
+    this.auraVisualHandler = new AuraVisualHandler(this.game, this.auraHandler);
 
     // The auto-attack BUTTON's checked state follows the SERVER, not what we sent -- see
     // `SpellHandler#autoAttacking`. `combat.ts` already reads both opcodes for the swing animation and

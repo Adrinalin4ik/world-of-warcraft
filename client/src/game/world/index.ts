@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import Player from "../classes/player";
 import Unit from "../classes/unit";
 import spots from "./spots";
+import { billboardRows, resetBillboardProbe } from './billboard-probe';
 
 import { EventEmitter } from "events";
 import { GameHandler } from '../../network/game/handler';
@@ -25,6 +26,10 @@ import { reactionFor, REACTION_NEUTRAL } from "./faction";
 import { HoverHighlight } from "./hover-highlight";
 import { SelectionRing } from "./selection-ring";
 import { LevelUpEffect } from "./level-up-effect";
+import { SpellKitEffects } from "./spell-kit-effects";
+import { spellData } from "../pipeline/dbc/spell-data";
+import { SpellMissiles } from "./spell-missile";
+import { installSpellFxScaleKnob } from "./spell-fx-scale";
 import GameObjectSparkle from './game-object-sparkle';
 import SessionGuard from './session-guard';
 import ModelFade from './model-fade';
@@ -68,6 +73,20 @@ export default class World extends EventEmitter {
    * session, not in the render loop, and the effect has to be started from there.
    */
   public levelUpEffect: LevelUpEffect;
+
+  /**
+   * THE SPELL VISUAL KIT EFFECTS -- the attach-point models and ground plants a cast hangs on a
+   * unit. Public because the cast edges arrive in the network layer
+   * (`network/game/object/spells.ts`), which is where the pose is already armed from, and routing
+   * them through `playSpellKit` below is what supplies the particle manager they need.
+   */
+  public spellKitEffects: SpellKitEffects;
+
+  /**
+   * THE PROJECTILES -- the owner's "основная вещь". Public for the same reason
+   * `spellKitEffects` is: the launch edge is `SMSG_SPELL_GO` in the network layer.
+   */
+  public spellMissiles: SpellMissiles;
 
   /** The glow on a quest objective object. See `game-object-sparkle.ts`. */
   public gameObjectSparkle: GameObjectSparkle;
@@ -244,6 +263,101 @@ export default class World extends EventEmitter {
     // THE LEVEL-UP BURST, on the scene ROOT for the selection ring's reason directly above: its
     // position is world-space and it belongs to no placed subtree. Draws nothing until a level lands.
     this.levelUpEffect = new LevelUpEffect(this.scene);
+    this.spellKitEffects = new SpellKitEffects(this.scene);
+    this.spellMissiles = new SpellMissiles(this.scene);
+    // `window.worldSpellFxScale(n)` -- the owner's instrument for the one question the data cannot
+    // answer. Defaults to 1, so installing it changes nothing. See `spell-fx-scale.ts`.
+    installSpellFxScaleKnob(() => [
+      ...this.spellKitEffects.liveModels(),
+      ...this.spellMissiles.liveModels(),
+    ]);
+
+    /**
+     * `window.worldSpellFx()` -- WHICH GATE CLOSED, for the projectile nobody can see.
+     *
+     * The kit effects are visible when enlarged and the missile is not, on the same manager, material
+     * and batch. Every difference between the two lanes is upstream of the renderer and used to be a
+     * silent `return`; they are all counted now, and this is where they can be read. One cast answers
+     * it: a non-zero `implausibleTail` means the `SMSG_SPELL_GO` decode failed its own stride check,
+     * `noTargets` means the tail named nobody, `targetNotInWorld` means the aim had no position,
+     * `modelless` means the visual chain named no model, `speedless` means the spell has no Speed at
+     * all. `launched` non-zero with `liveMissiles` zero means they flew and expired unseen, which is a
+     * different bug from never launching.
+     */
+    (window as unknown as Record<string, unknown>).worldSpellFx = () => {
+      const player = this.player ? this.player.position : null;
+      const dist = (at: number[]) => (player === null ? null : Math.round(
+        Math.hypot(at[0] - player.x, at[1] - player.y, at[2] - player.z) * 100,
+      ) / 100);
+      return {
+        // WHERE the player is, so every distance below is readable without a second call.
+        player: player === null ? null
+          : [Math.round(player.x * 100) / 100, Math.round(player.y * 100) / 100,
+            Math.round(player.z * 100) / 100],
+        missiles: { ...this.spellMissiles.stats, live: this.spellMissiles.liveCount },
+        // THE BILLBOARD LAST-HOP PROBE, one row per billboarded bone of each live kit instance.
+        // `frames` first in every row because it decides whether the rest of the row means anything:
+        // two console reads whose `frames` has not advanced are one stale sample. Then turn the
+        // camera and read again -- `writerRotChangeDeg` moving while `paletteRotChangeDeg` stays ~0
+        // is proof the billboard never reached the skinning palette. `billboard-probe.ts` carries the
+        // full decision table.
+        billboards: billboardRows(),
+        // `worldBillboardReset()` zeroes the maxima, so a fresh attempt is not read against an old
+        // session's numbers -- the maxima accumulate across casts by design.
+        // THE PARTICLE COUNTER. Per-emitter live counts with the authored rate and lifespan at BOTH
+        // t=0 and track-peak, named separately -- `particle/manager.ts#liveByEmitter` carries why a
+        // single `expected` was a defect. `suspectDead` is the field to read FIRST: it counts
+        // emitters that are IN RANGE, NOT culled, and have held no particle for a while. Zero means
+        // every empty emitter is explained by distance; anything above zero is the owner's oldest
+        // unconfirmed report ("доодадных частиц не видно") finally reproducing, and it matters more
+        // than any spell effect. Reads the map's manager, which is null before a world exists and is
+        // replaced on a worldport -- hence the lookup rather than a cached reference.
+        particles: (() => {
+          const pm = (this.map as unknown as { particleManager?: {
+            liveByEmitter?: () => unknown[]; liveParticleCount?: number; emitterCount?: number;
+          } } | null)?.particleManager ?? null;
+          if (!pm || typeof pm.liveByEmitter !== 'function') {
+            return null;
+          }
+          const rows = pm.liveByEmitter() as Array<{
+            path: string; live: number; culled: boolean;
+            distance: number | null; framesSinceLive: number;
+          }>;
+          // IN RANGE, NOT CULLED, AND EMPTY FOR OVER A SECOND at 60fps. The 60-frame floor is there
+          // so an emitter that simply has not reached its first birth yet -- a slow rate, or the
+          // frame it registered on -- is not reported as dead.
+          const dead = rows.filter((r) => !r.culled && r.live === 0 && r.framesSinceLive > 60);
+          return {
+            emitters: pm.emitterCount,
+            liveTotal: pm.liveParticleCount,
+            suspectDead: dead.length,
+            suspectDeadPaths: Array.from(new Set(dead.map((r) => r.path))).slice(0, 12),
+            byEmitter: rows,
+          };
+        })(),
+        kits: { ...this.spellKitEffects.stats, live: this.spellKitEffects.liveCount },
+        // THE LEAK CHECK. `armedMinusRemoved` must ALWAYS equal `kits.live` -- if it does not,
+        // `remove` is being skipped. `stuck` is the diagnosis in one number: any row whose deadline
+        // has passed without it being removed. `live` describes EVERY instance including
+        // self-terminating ones, which the first version of this wrongly filtered out.
+        kitLeak: {
+          armedMinusRemoved: this.spellKitEffects.stats.armed - this.spellKitEffects.stats.removed,
+          liveCount: this.spellKitEffects.liveCount,
+          stuck: this.spellKitEffects.liveDetail().filter((row) => row.stuck).length,
+          live: this.spellKitEffects.liveDetail(),
+        },
+        // THE DECIDING NUMBERS. `distFromPlayer` should be a couple of units for a hand effect and
+        // under `ParticleManager.CULL_DISTANCE` (120) for anything meant to be seen at all. A large
+        // number here explains the tiny dots, the rock occluding them, and an invisible projectile,
+        // all three at once -- see `SpellKitEffects#liveTransforms`.
+        liveKits: this.spellKitEffects.liveTransforms()
+          .map((k) => ({ ...k, distFromPlayer: dist(k.at) })),
+        liveMissiles: this.spellMissiles.liveTransforms()
+          .map((m) => ({ ...m, distFromPlayer: dist(m.at) })),
+        missileLastError: this.spellMissiles.lastError,
+        kitLastError: this.spellKitEffects.lastError,
+      };
+    };
     this.gameObjectSparkle = new GameObjectSparkle(this.scene);
     /**
      * `window.worldGameObjects()` -- WHY A BUSH IS NOT ON SCREEN, in one call.
@@ -1024,6 +1138,44 @@ export default class World extends EventEmitter {
     if (newModel) {
       registry.addFrom(newModel);
     }
+
+    // A UNIT'S OWN MODEL EMITTERS -- and until this line no creature in the game had any.
+    //
+    // The owner: "Моб вонючий волк. Партиклы вокруг него появляются только после первого удара. А он
+    // вонючий, он должен вонять всегда." He was right that it is the mob's own built-in
+    // visualisation and nothing to do with the character -- and the reason it waited for a hit is
+    // that it was never HIS particles. `ParticleManager.register` was called from exactly five
+    // places: WMO doodads, ADT doodads, the gameobject sparkle, the level-up effect, and the two
+    // spell lanes (kits and missiles). **Nothing registered a unit's model.** What appeared after
+    // the first strike was the impact KIT's own emitters, on a model this lane loads and registers.
+    //
+    // MEASURED: 70 of 155 cached creature models (45.2%) author particle emitters -- 4 to 10 each on
+    // wraiths, spectral bears, clockwork gnomes, swamp-gas clouds, cold wraiths, doomguards. None of
+    // them has ever run.
+    //
+    // HERE rather than in `Unit`, for the reason `playSpellKit` states: the particle manager belongs
+    // to the MAP and the map is replaced on a worldport, so a unit-side cached reference would be
+    // the previous world's. And in `changeModel` specifically because this method is ALREADY the
+    // symmetric edge -- `removeEntity` calls `changeModel(entity, entity.model, null)` precisely so
+    // the outgoing body is handed back, so unregistering the old model here costs nothing extra and
+    // cannot be forgotten on a stream-out.
+    //
+    // AFTER the `registry` guard above, which returns when no map exists yet. That is the player's
+    // own case (his model resolves before the first zone finishes) and it is covered the same way the
+    // registry is: `changeMap`'s re-adoption walk below registers every entity's model once the map
+    // is there.
+    const particles = (this.map as unknown as {
+      particleManager?: { register: (m: unknown) => number; unregister: (m: unknown) => void };
+      ribbonManager?: { register: (m: unknown) => number; unregister: (m: unknown) => void };
+    } | null);
+    if (oldModel) {
+      particles?.particleManager?.unregister(oldModel);
+      particles?.ribbonManager?.unregister(oldModel);
+    }
+    if (newModel) {
+      particles?.particleManager?.register(newModel);
+      particles?.ribbonManager?.register(newModel);
+    }
   }
 
   /**
@@ -1040,10 +1192,20 @@ export default class World extends EventEmitter {
       return;
     }
 
+    // The particle/ribbon managers get the same walk, and for the same reason the registry does: a
+    // model that resolved BEFORE the map existed took `changeModel`'s early return, so this is the
+    // only place it can be picked up. `register` is idempotent -- it returns early on an instance it
+    // already holds -- so re-walking every zone change costs one Set lookup per entity.
+    const particles = (this.map as unknown as {
+      particleManager?: { register: (m: unknown) => number };
+      ribbonManager?: { register: (m: unknown) => number };
+    } | null);
     this.entities.forEach((entity) => {
       const model = entity.model;
       if (model) {
         registry.addFrom(model);
+        particles?.particleManager?.register(model);
+        particles?.ribbonManager?.register(model);
       }
     });
   }
@@ -1051,6 +1213,79 @@ export default class World extends EventEmitter {
   changePosition(position: THREE.Vector3, _rotation: THREE.Vector3) {
     this.renderAtCoords(position.x, position.y);
     // this.skybox.position.set(position.x, position.y, 100)
+  }
+
+  /**
+   * Arm a spell visual kit on a unit -- the ONE door the cast edges use.
+   *
+   * Here rather than on `SpellKitEffects` itself because the particle manager belongs to the MAP, and
+   * the map is replaced on a worldport: a cached manager would be the previous world's. Exactly the
+   * reason `LevelUpEffect#play` takes one as an argument, and the same lookup `gameObjectSparkle`
+   * does per frame.
+   *
+   * `persistent` is the stage: true for the precast kit armed at `SMSG_SPELL_START`, false for the
+   * cast release armed at `SMSG_SPELL_GO`.
+   */
+  /**
+   * A missile arrived: play the spell's IMPACT kit on the VICTIM.
+   *
+   * The impact stage plays on the target rather than the caster, which is why it was unreachable until
+   * `SMSG_SPELL_GO`'s hit list was decoded -- one decode bought the missile's destination and this.
+   * Self-terminating, like the cast release: an impact flash is not a held state.
+   */
+  playImpactKit(targetGuid: string, spellId: number): void {
+    const stats = this.spellKitEffects.stats;
+    stats.impactAsked += 1;
+    const victim = this.entities.get(targetGuid);
+    if (!victim) {
+      // The guid is not in our object set -- it left the world during a missile's flight, or the GO
+      // named something we never streamed. Counted, because it is indistinguishable from "the effect
+      // did not play" without a number.
+      stats.impactNoVictim += 1;
+      return;
+    }
+    const kit = spellData.impactKit(spellId);
+    if (kit === null) {
+      // The spell authors no impact stage. Common and correct -- most spells do not.
+      stats.impactNoKit += 1;
+      return;
+    }
+    stats.impactPlayed += 1;
+    this.playSpellKit(victim, spellId, kit, false);
+  }
+
+  /**
+   * Launch a cast's projectiles -- the ONE door the GO edge uses, for the particle-manager reason
+   * `playSpellKit` gives.
+   */
+  launchSpellMissiles(
+    caster: Unit,
+    spellId: number,
+    hits: string[],
+    misses: string[],
+    groundAt: { x: number; y: number; z: number } | null,
+  ): void {
+    this.spellMissiles.launch(
+      caster,
+      spellId,
+      hits,
+      misses,
+      groundAt,
+      (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
+      (guid: string) => this.entities.get(guid)?.position ?? null,
+      (this.map as unknown as { ribbonManager?: never } | null)?.ribbonManager ?? null,
+    );
+  }
+
+  playSpellKit(unit: Unit, spellId: number, kitId: number, persistent: boolean): void {
+    this.spellKitEffects.play(
+      unit,
+      spellId,
+      kitId,
+      persistent,
+      (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
+      (this.map as unknown as { ribbonManager?: never } | null)?.ribbonManager ?? null,
+    );
   }
 
   animate(
@@ -1166,6 +1401,23 @@ export default class World extends EventEmitter {
       this.entities,
       (this.map as unknown as { particleManager?: never } | null)?.particleManager ?? null,
     );
+    // The kit effects: one array-length compare with nothing live, one subtract-and-compare per live
+    // instance otherwise. `ownerGone` is what releases a model handle when a unit leaves the world --
+    // a bone child dies with its body but `M2Blueprint.unload` is a refcount and would never be
+    // called. Same `entities` identity test `combatText.update` takes.
+    this.spellKitEffects.update(
+      delta * 1000,
+      (guid: string) => this.entities.get(guid) === undefined,
+      camera,
+    );
+    // The projectiles: one array-length compare with nothing in flight. `unitAt` is what makes the
+    // flight HOMING -- the aim is re-resolved every frame off the live entity set.
+    this.spellMissiles.update(
+      delta * 1000,
+      (guid: string) => this.entities.get(guid)?.position ?? null,
+      (targetGuid: string, spellId: number) => this.playImpactKit(targetGuid, spellId),
+      camera,
+    );
 
     // THE NAMEPLATES, an EIGHTH named span. See the exhaustiveness note above: a statement outside all
     // of them breaks the sum rule, and that is the tell it exists for. After the entity pass for the
@@ -1209,8 +1461,15 @@ export default class World extends EventEmitter {
     if (this.map !== null) {
       if (cameraMoved) {
         beginSection('w.vis');
-        this.map.locateCamera(camera);
-        this.map.updateVisibility(camera);
+        /**
+         * The PLAYER's own position rides along as a fallback seed. A third-person eye is routinely
+         * outside the room -- measured at ten yards horizontally and seven up from the feet, which
+         * put it outside the abbey hall entirely and made the whole world resolve as OUTDOORS. See
+         * `location-manager.js#locateCamera`; the eye is still tried first.
+         */
+        const bodySeed = this.player ? this.player.position : null;
+        this.map.locateCamera(camera, bodySeed);
+        this.map.updateVisibility(camera, bodySeed);
         endSection('w.vis');
       }
       // `map.animate` itself calls `updateWorldTime` first thing, with the real per-frame `delta` --

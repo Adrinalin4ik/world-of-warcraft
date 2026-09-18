@@ -56,10 +56,23 @@ export class LiquidRegistry {
    * Where several eligible sheets overlap, the highest wins: a swimmer belongs to the surface above
    * them.
    */
+  /**
+   * Exact per-call counters -- see `window.moveProfile()`.
+   *
+   * **INTEGERS, NOT A CLOCK, and that is deliberate.** `performance.now()` on the owner's browser is
+   * quantised to **100 us**: a per-gather timing read exactly `0` on one sample and exactly `100` on
+   * two others, which is a granularity artefact and not a measurement. Anything smaller than 100 us
+   * therefore cannot be timed directly here, so what gets counted is the WORK -- and `visited` is the
+   * number that matters, because each visit pays a 4x4 matrix inversion in `heightOn`.
+   */
+  readonly census = { calls: 0, visited: 0, registered: 0 };
+
   surfaceAt(
     x: number, y: number, claim: LiquidClaim,
   ): { surfaceZ: number; owner: object | null } | null {
     let best: { surfaceZ: number; owner: object | null } | null = null;
+    this.census.calls += 1;
+    this.census.registered = this.surfaces.size;
 
     for (const surface of this.surfaces.values()) {
       // The scope key. Indoors only THIS room's sheet answers; outdoors only unowned ADT sheets.
@@ -69,6 +82,9 @@ export class LiquidRegistry {
         continue;
       }
 
+      // COUNTED HERE, past the owner filter, because this is the visit that costs: `heightOn` opens
+      // with `_inverse.copy(mesh.matrixWorld).invert()`, a matrix inversion per surface per call.
+      this.census.visited += 1;
       const z = this.heightOn(surface, x, y);
       if (z !== null && (best === null || z > best.surfaceZ)) {
         best = { surfaceZ: z, owner: surface.owner };

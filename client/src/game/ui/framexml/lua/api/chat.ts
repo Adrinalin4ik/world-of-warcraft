@@ -72,6 +72,83 @@ export function resetChatTypeIds(): void {
   chatTypeIds.clear();
 }
 
+/**
+ * The player's default language, pushed by `chat-bridge.ts`. See `GetDefaultLanguage`.
+ *
+ * A snapshot rather than a callback, for the reason `api/spells.ts` pushes the spellbook as one: this
+ * module holds no world, and the join that produces it needs the descriptor and two DBCs.
+ */
+const defaultLanguageByVm = new WeakMap<LuaVM, { name: string; id: number }>();
+
+/**
+ * A channel NUMBER (or name) -> the name the wire wants, installed by `channel-bridge.ts`.
+ *
+ * `ChatEdit_SendText` passes the edit box's `channelTarget` attribute as `SendChatMessage`'s fourth
+ * argument (`chatframe.lua:3683`) and that attribute is a NUMBER, while the wire addresses a channel
+ * by NAME. Nothing between them knew the mapping, so `/1 hello` would have put "1" on the wire as the
+ * channel name and been discarded without a word.
+ *
+ * Null when the number names no channel this character is in, which stops the send rather than
+ * addressing a wrong one.
+ */
+export type ChannelSource = (target: string) => string | null;
+
+/**
+ * THE CHANNEL SINK -- membership to read and the two verbs to send, supplied by `channel-bridge.ts`.
+ *
+ * **AND IT EXISTS BECAUSE REGISTERING THESE GLOBALS IN THE BRIDGE BROKE THE CHAT WINDOW.** The first
+ * version of this work moved `GetChatWindowChannels`, `GetChannelName`, `GetChannelList`,
+ * `GetNumDisplayChannels` and the join/leave pair out of this file and registered them in the bridge.
+ * The bridge attaches AFTER the manifest, and the chat bridge fires `UPDATE_CHAT_WINDOWS` before it,
+ * whose arm calls `ChatFrame_RegisterForChannels(self, GetChatWindowChannels(self:GetID()))`
+ * (`chatframe.lua:2511`) -- a nil global there THROWS, `ChatFrame_OnEvent` aborts,
+ * `FloatingChatFrame_OnEvent` never runs, and the window never gets its colour or its alpha. The owner
+ * saw a WHITE BOX, which is the same symptom `GetObjectType` and `SetHyperlinksEnabled` each produced
+ * before it.
+ *
+ * So the rule this project already records applies exactly: **a global the client calls from an
+ * `OnLoad` or an early event must be registered BEFORE the manifest.** These are registered here, at
+ * API install time, and answer "no channels" until the sink arrives -- which is what every other
+ * bridge-fed global in this file already does.
+ */
+export interface ChannelSink {
+  /** The channels this character is in, in join order. */
+  channels: () => Array<{ number: number; name: string }>;
+  join: (name: string, password: string) => void;
+  leave: (name: string) => void;
+}
+
+const channelSinkByVm = new WeakMap<LuaVM, ChannelSink>();
+
+export function setChannelSink(vm: LuaVM, sink: ChannelSink | null): void {
+  if (sink === null) {
+    channelSinkByVm.delete(vm);
+  } else {
+    channelSinkByVm.set(vm, sink);
+  }
+}
+
+const channelSourceByVm = new WeakMap<LuaVM, ChannelSource>();
+
+export function setChannelSource(vm: LuaVM, source: ChannelSource | null): void {
+  if (source === null) {
+    channelSourceByVm.delete(vm);
+  } else {
+    channelSourceByVm.set(vm, source);
+  }
+}
+
+export function setDefaultLanguage(
+  vm: LuaVM,
+  pair: { name: string; id: number } | null,
+): void {
+  if (pair === null) {
+    defaultLanguageByVm.delete(vm);
+  } else {
+    defaultLanguageByVm.set(vm, pair);
+  }
+}
+
 export function installChatApi(vm: LuaVM): void {
   /**
    * `GetChatTypeIndex(typeName)` -> a stable number for that chat type.
@@ -212,7 +289,10 @@ export function installChatApi(vm: LuaVM): void {
       + 'its authored anchor on reload', []],
     ['SetChatWindowSavedDimensions', 'no chat window layout is persisted, so a resized window returns '
       + 'to its authored size on reload', []],
-    ['GetChatWindowChannels', 'no chat settings are persisted', []],
+    // `GetChatWindowChannels` has LEFT this list -- `channel-bridge.ts` answers it from live
+    // membership. Its note said "no chat settings are persisted", which is still true and was never
+    // the reason a channel message did not show: the client needs the list to REGISTER a frame for a
+    // channel at all (`chatframe.lua:2511`), persisted or not.
     ['AddChatWindowMessages', 'no chat settings are persisted', []],
     ['RemoveChatWindowMessages', 'no chat settings are persisted', []],
     ['AddChatWindowChannel', 'no chat settings are persisted', []],
@@ -277,16 +357,14 @@ export function installChatApi(vm: LuaVM): void {
       + 'and nil is what makes ChatEdit_UpdateHeader treat a whisper as a whisper', []],
     ['GetAutoCompleteResults', 'no name index is kept (friends, guild, recent whispers), so there are '
       + 'no completion candidates -- and NOTHING is what ChatEdit_ExtractTellTarget needs to hear', []],
-    // The channel system: `CMSG_JOIN_CHANNEL` and its family are not sent, and no channel list is read.
-    ['GetChannelList', 'no chat channel is joined: CMSG_JOIN_CHANNEL is not sent', []],
-    ['GetNumDisplayChannels', 'no chat channel is joined', [0]],
-    ['GetChannelDisplayInfo', 'no chat channel is joined', []],
-    ['JoinPermanentChannel', 'no chat channel is joined', []],
-    ['JoinTemporaryChannel', 'no chat channel is joined', []],
-    ['LeaveChannelByName', 'no chat channel is joined', []],
-    ['ListChannels', 'no chat channel is joined', []],
-    ['ListChannelByName', 'no chat channel is joined', []],
-    ['GetChannelName', 'no chat channel is joined', [0, '', 0]],
+    // The channel system: `channel-bridge.ts` registers `JoinPermanentChannel`,
+    // `JoinTemporaryChannel`, `LeaveChannelByName`, `GetChannelName`, `GetChannelList`,
+    // `GetNumDisplayChannels` and `GetChatWindowChannels` over live membership, so those have LEFT
+    // this list. What stays is the part that needs `SMSG_CHANNEL_LIST` -- the roster of a channel --
+    // which nothing in this client asks for yet.
+    ['GetChannelDisplayInfo', 'the channel roster needs SMSG_CHANNEL_LIST, which is not requested', []],
+    ['ListChannels', 'the channel roster needs SMSG_CHANNEL_LIST, which is not requested', []],
+    ['ListChannelByName', 'the channel roster needs SMSG_CHANNEL_LIST, which is not requested', []],
     // Colours. `ChangeChatColor` would persist a CVar this client does not keep, and the reader
     // (`GetChatTypeIndex`-tagged lines) is already satisfied by the defaults set at file scope.
     ['ChangeChatColor', 'no chat colour is persisted, so a change would not survive the frame', []],
@@ -294,9 +372,7 @@ export function installChatApi(vm: LuaVM): void {
     // `SendChatMessage` has LEFT this list -- it is real below. Its note said "CMSG_MESSAGECHAT is
     // not built yet", and that stopped being true when `network/game/object/chat.ts#send` landed;
     // the packet was there and nothing called it.
-    ['GetDefaultLanguage', 'no language state is read from the wire', ['Common', 7]],
-    ['GetLanguageByIndex', 'no language state is read from the wire', ['Common', 7]],
-    ['GetNumLanguages', 'no language state is read from the wire', [1]],
+
     // The logging commands two slash handlers reach.
     ['LoggingChat', 'this client writes no chat log file', [false]],
     ['LoggingCombat', 'this client writes no combat log file', [false]],
@@ -336,8 +412,187 @@ export function installChatApi(vm: LuaVM): void {
       );
       return [];
     }
-    sender?.(type, text, target, Number.isFinite(language) ? language : null);
+    /**
+     * A CHANNEL TARGET IS A NUMBER AND THE WIRE WANTS A NAME. See `setChannelSource`.
+     *
+     * Resolved here rather than in `chat.ts#send` because the mapping is the ENGINE's channel list,
+     * which lives in the bridge -- and because a refusal has to stop the send: an unresolvable
+     * channel number would otherwise go out as its own digits and be discarded in silence, which is
+     * the failure mode this project keeps paying for.
+     */
+    let resolved = target;
+    if (typeName === 'CHANNEL') {
+      resolved = channelSourceByVm.get(vm)?.(String(target ?? '')) ?? null;
+      if (resolved === null) {
+        warnOnce(
+          `SendChatMessage: no channel is joined as '${String(target)}', so the message was not sent`,
+        );
+        return [];
+      }
+    }
+    sender?.(type, text, resolved, Number.isFinite(language) ? language : null);
     return [];
+  });
+
+  /**
+   * THE PLAYER'S OWN TONGUE -- `GetDefaultLanguage`, and its literal answer was a DECLARED refusal.
+   *
+   * It used to return `'Common', 7` for everyone. `network/game/object/chat.ts#send`'s own comment
+   * states the cost: TrinityCore checks the sender can speak the language before it broadcasts and a
+   * failed check returns WITHOUT A REPLY, so a Horde character's `/say` was refused in total silence
+   * -- the same signature the item link spent three rounds on, declared in a comment rather than
+   * discovered.
+   *
+   * Now a snapshot the chat bridge pushes: the player's race joined to `ChrRaces.dbc`'s
+   * `baseLanguage` and then to `Languages.dbc` for the name. Both columns are in the schemas already;
+   * see `dbc/language-data.ts`.
+   *
+   * NOTHING, not a fallback pair, while the race or the DBC is missing. A wrong language is a message
+   * the server discards; nil makes `editBox.language` nil, which `chat.ts#send` reads as "use my
+   * default" -- so the first second of a session behaves exactly as it did before this existed, and a
+   * Horde player gets the right answer the moment the join resolves rather than a plausible wrong one.
+   */
+  vm.registerFunction('GetDefaultLanguage', () => {
+    const pair = defaultLanguageByVm.get(vm) ?? null;
+    return pair === null ? [] : [pair.name, pair.id];
+  });
+
+  /**
+   * `GetNumLanguages()` / `GetLanguageByIndex(i)` -- the languages this character can speak.
+   *
+   * ONE, the base tongue, and that is a stated limit rather than a guess: a character also knows any
+   * language a racial or a learned skill grants, and those come from the SKILL list
+   * (`SMSG_INITIAL_SPELLS`' skill lines joined to `SkillLineAbility`), which this client does not read
+   * for languages. So the list holds what is known to be true and no more.
+   *
+   * A COUNT, so 0 is the honest answer for "not resolved yet" and not a falsy accident: the client
+   * loops `for i = 1, GetNumLanguages()` and an empty loop is exactly right there.
+   */
+  vm.registerFunction('GetNumLanguages', () => [defaultLanguageByVm.get(vm) === undefined ? 0 : 1]);
+  vm.registerFunction('GetLanguageByIndex', (args) => {
+    const pair = defaultLanguageByVm.get(vm) ?? null;
+    if (pair === null || Number(args[0]) !== 1) {
+      return [];
+    }
+    return [pair.name, pair.id];
+  });
+
+  /**
+   * THE CHANNEL GLOBALS. Registered HERE and not in the bridge -- see `ChannelSink` for what moving
+   * them cost. Each answers the "no channels" shape while the sink is absent, which is the truthful
+   * answer before a session exists as well as during one where nothing has been joined.
+   */
+  const channelsNow = (): Array<{ number: number; name: string }> => (
+    channelSinkByVm.get(vm)?.channels() ?? []
+  );
+
+  /**
+   * `JoinPermanentChannel(name, password, frameId, zoneUpdate)` -> `zoneChannelNumber, channelName`.
+   *
+   * **ANSWERS THE NUMBER THE CHANNEL WILL HAVE, and answering NOTHING was a defect I shipped.** The
+   * first return gates `CHAT_INVALID_NAME_NOTICE` (`chatframe.lua:1538-1542`), so a falsy one makes
+   * the client print "invalid channel name" -- which it did on EVERY `/join`, including the one that
+   * demonstrably worked: the owner joined `world`, `GetChannelName(1)` answered it, and he was told
+   * the name was invalid. Refusing to guess produced a lie on screen, which is worse than the guess.
+   *
+   * THE PREDICTION IS EXACT WHEN THE JOIN SUCCEEDS, because the number is positional and assigned in
+   * join order (`channel.ts#joined`): the next channel gets `count + 1`, which is what this returns,
+   * and a name already joined returns its existing number. When the join FAILS the client has added a
+   * row to its own `channelList` that the engine does not have -- and that self-corrects, because the
+   * notify's `UPDATE_CHAT_WINDOWS` rebuilds that list from `GetChatWindowChannels`, which is
+   * authoritative. So the failure mode is a stale row for one round trip, against a false refusal on
+   * every success.
+   *
+   * The SECOND return is left nil: it lets the client replace the name it typed with the canonical
+   * one, and this client does not know the canonical form until the notify arrives. Nil makes
+   * `if ( channelName ) then name = channelName end` keep what the player typed, which is right.
+   */
+  vm.registerFunction('JoinPermanentChannel', (args) => {
+    const name = String(args[0] ?? '').trim();
+    if (name === '') {
+      return [];
+    }
+    const list = channelsNow();
+    const already = list.find((entry) => entry.name.toLowerCase() === name.toLowerCase()) ?? null;
+    channelSinkByVm.get(vm)?.join(name, String(args[1] ?? ''));
+    return [already === null ? list.length + 1 : already.number];
+  });
+  vm.registerFunction('JoinTemporaryChannel', (args) => {
+    const name = String(args[0] ?? '').trim();
+    if (name !== '') {
+      channelSinkByVm.get(vm)?.join(name, String(args[1] ?? ''));
+    }
+    return [];
+  });
+  vm.registerFunction('LeaveChannelByName', (args) => {
+    const name = String(args[0] ?? '').trim();
+    if (name !== '') {
+      channelSinkByVm.get(vm)?.leave(name);
+    }
+    return [];
+  });
+
+  /**
+   * `GetChannelName(nameOrIndex)` -> `number, name, instanceId`.
+   *
+   * BOTH ARGUMENT FORMS, because the client uses both: `ChatEdit_UpdateHeader` passes the edit box's
+   * `channelTarget` (a number) and `ChatEdit_ExtractChannel` passes a typed word (a name).
+   *
+   * ZERO for a channel this character is not in -- the one place in this area where 0 beats nothing,
+   * because `itemref.lua:164` compares `GetChannelName(...) == 0` and a nil would raise.
+   *
+   * `instanceId` is 0: it distinguishes multiple instances of one zone channel, and this client is
+   * never in more than one.
+   */
+  vm.registerFunction('GetChannelName', (args) => {
+    const list = channelsNow();
+    const asNumber = Number(args[0]);
+    if (Number.isFinite(asNumber) && asNumber > 0) {
+      const found = list.find((entry) => entry.number === asNumber) ?? null;
+      return found === null ? [0, '', 0] : [found.number, found.name, 0];
+    }
+    const wanted = String(args[0] ?? '').toLowerCase();
+    const byName = list.find((entry) => entry.name.toLowerCase() === wanted) ?? null;
+    return byName === null ? [0, '', 0] : [byName.number, byName.name, 0];
+  });
+
+  /**
+   * `GetChannelList()` -> a FLAT list of `number, name, disabled` triples.
+   *
+   * Flat and not a table: the client consumes it with `select` over a vararg, so a table would arrive
+   * as one value. `disabled` marks a channel the player has muted and nothing here can mute one.
+   */
+  vm.registerFunction('GetChannelList', () => {
+    const out: unknown[] = [];
+    for (const entry of channelsNow()) {
+      out.push(entry.number, entry.name, false);
+    }
+    return out;
+  });
+  vm.registerFunction('GetNumDisplayChannels', () => [channelsNow().length]);
+
+  /**
+   * `GetChatWindowChannels(index)` -> `name, zoneChannelNumber` PAIRS.
+   *
+   * **THIS IS WHAT MAKES AN INCOMING CHANNEL MESSAGE VISIBLE.** `UPDATE_CHAT_WINDOWS` ->
+   * `ChatFrame_RegisterForChannels(self, GetChatWindowChannels(self:GetID()))` (`chatframe.lua:2511`)
+   * fills `frame.channelList`, and `ChatFrame_MessageEventHandler` shows a `CHAT_MSG_CHANNEL` line only
+   * if the channel is in that list -- so while this was empty every channel message the server sent was
+   * decoded, coloured and dropped.
+   *
+   * WINDOW 1 ONLY, and every channel this character is in. The real client keeps a per-window
+   * subscription in its saved variables; this client persists nothing, so the honest reading of "no
+   * saved settings" is that the default window shows what the player joined.
+   */
+  vm.registerFunction('GetChatWindowChannels', (args) => {
+    if (Number(args[0]) !== 1) {
+      return [];
+    }
+    const out: unknown[] = [];
+    for (const entry of channelsNow()) {
+      out.push(entry.name, entry.number);
+    }
+    return out;
   });
 
   for (const [name, reason, results] of gaps) {

@@ -8,7 +8,6 @@ import WMORootView from './view';
 class WMORoot {
 
   constructor(def) {
-    console.log('WMOROOT', def)
     this.path = def.path;
     this.id = def.rootID;
     this.header = def.header;

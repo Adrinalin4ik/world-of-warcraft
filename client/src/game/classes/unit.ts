@@ -449,6 +449,13 @@ class Unit extends Entity {
    */
   public equippedMainhand: number = 0;
   public equippedOffhand: number = 0;
+  /**
+   * The RANGED slot's entry, feeding `combat-anim.ts#rangedLoadAnimation` -- a bow, gun, crossbow,
+   * thrown weapon or wand. A third field rather than a widening of the two above because the wire
+   * puts it in a third place again: `UNIT_VIRTUAL_ITEM_SLOT_ID + 2` for a creature and
+   * `PLAYER_VISIBLE_ITEM_18_ENTRYID` for a player (slot 18 one-based is `EQUIPMENT_SLOT_RANGED`).
+   */
+  public equippedRanged: number = 0;
 
   /**
    * `GetSpellBonusDamage(school)` for the seven spell schools -- `$SP`'s source. Empty until a values
@@ -1952,6 +1959,26 @@ class Unit extends Entity {
     return this.externalSeq?.id ?? null;
   }
 
+  /**
+   * **The base track is held by an externally-armed LOOP** -- a cast pose, a looping emote -- so a
+   * one-shot arriving over it would REPLACE it and nothing would ever put it back.
+   *
+   * The `loops` half is the whole of it, and it is what separates "held for ever" from "held for a
+   * window": a non-looping external owner releases itself when its window elapses
+   * (`externalSeq`'s own release, checked at the top of `updateLocomotion`), so a one-shot over THAT
+   * costs a moment of the clip. A LOOP never reaches that release -- `externalSeq` documents "a
+   * looping owner never releases" -- so the only way back is an explicit
+   * `releaseAnimationLatch`, and a caller that stomps a loop it does not own has destroyed a pose
+   * permanently.
+   *
+   * Exposed for `network/game/object/combat.ts`'s victim flinch, which is the caller that was doing
+   * exactly that to a held cast pose. Read-only, and deliberately NOT a way to clear the latch: the
+   * one legitimate release is `releaseAnimationLatch`, which checks identity.
+   */
+  get baseHeldByLoop(): boolean {
+    return this.externalSeq !== null && this.externalSeq.loops;
+  }
+
   stopAnimation(id?: number) {
     const animationId = id === undefined ? this.currentAnimationId : id;
     this.emit("animation:stop", animationId);
@@ -2110,6 +2137,17 @@ class Unit extends Entity {
    * teleport simply is not there for the first few frames.
    */
   teleportTo(x: number, y: number, z: number) {
+    // A RELOCATION VOIDS ANY IN-PROGRESS SERVER RIDE, and it is the ONE place that can say so.
+    //
+    // The server teleports at ITS end of a ride -- a taxi's landing beats our own spline end by
+    // about the latency -- and its spline-done handler ignores acknowledgements while a teleport is
+    // pending, so the relocation IS the hand-back and no `CMSG_MOVE_SPLINE_DONE` is owed. Mirroring
+    // the still-running spline on the next frame would clobber the snap this method just made.
+    // `serverRideFrame` consumes the flag; see `PlayerMoveState#rideAbort` for the reference's own
+    // account (`player/state.rs:612-618`, decision 0501).
+    this.move.rideAbort = true;
+    this.splineRide = null;
+
     this.move.pos.set(x, y, z);
     this.move.velZ = 0;
     this.move.horizVel.set(0, 0, 0);

@@ -147,6 +147,42 @@ export const STEP_SNAP_SLACK = 1 / 36;
 export const STEP_UP_HEIGHT = 0.7;
 
 /**
+ * **THE STEP-UP'S FORWARD REACH (yd), and it is a property of the BODY, not of the frame rate.**
+ *
+ * How far the maneuver must reach to SEE the tread it would stand on is a question about the
+ * body's width, so it cannot be this frame's travel -- and passing travel for it is the defect the
+ * owner walked into. Measured on his own trace at a step he could not climb: `fwd` equal to `travel`
+ * at 0.17-0.22 yd, the elevated sweep completely free, and the settle nevertheless descending 0.6991
+ * of a 0.7 rise -- back onto its own floor, `climb` 0.0009, refused by the net-zero bar.
+ *
+ * The arithmetic says why, and it is about the capsule's WIDTH. Pressed against a riser the centre
+ * stands `CAPSULE_RADIUS + skin` from its plane; advancing one frame leaves the centre still BEHIND
+ * that plane, so the descending capsule's lower sphere still overhangs the floor it came from --
+ * 0.70 away, where the tread edge is 1.16 away. The nearer surface wins and the maneuver lands where
+ * it started. To clear the lip the advance must exceed a radius, and a radius is not a time.
+ *
+ * **THE VALUE IS THE GAME'S, not a body-scaled guess of ours.** The reference reads it out of the
+ * client at `0x636193`, where `ebx` is `max(H * tan50deg, radius + 1/720)` and has exactly two uses,
+ * both the LENGTH argument to the sweep at `0x632ba0` -- never added to a position. With the
+ * verified `H` of 1.0 (decision 1125: `0x617430` is `[unit+0xb8]`, the dimensionless scale ratio,
+ * so a player's `H` is 1.0) that is **1.1917536**
+ * (`samples/benilla/crates/benilla-app/src/player/state.rs:184`).
+ *
+ * That 1.0 is the CLIENT's step budget and our own `STEP_UP_HEIGHT` above is not -- 0.7 is ours and
+ * deliberately modest. The two are independent and both stay: this constant is a SWEEP LENGTH, and
+ * lengthening a sweep does not widen what may be climbed. The reference makes that argument
+ * explicitly and it is what makes the longer reach safe: the rise ceiling still bounds the lift, the
+ * settle must still find a WALKABLE floor higher than the feet, and -- the load-bearing part -- the
+ * elevated forward sweep is CLIPPED by anything in the way, so the advance only ever reaches as far
+ * as there is clear air at the raised height. A fence, a trunk and a two-trunk pinch still block at
+ * the same body height, with a clipped advance and a net-zero settle.
+ *
+ * The frame's own travel still wins when it is longer, so this is a FLOOR and not a fixed reach: a
+ * very low frame rate never steps you less far than you asked to walk.
+ */
+export const STEP_UP_ADVANCE = 1.1917536;
+
+/**
  * The landing probe (yd): while airborne, walk mode resumes only this close to the floor, so the
  * arc ends where the slide actually contacts.
  *
@@ -232,8 +268,96 @@ export const SETTLE_TIMEOUT = 6.0;
  */
 export const SETTLE_STREAM_TIMEOUT = 30.0;
 
+/**
+ * **HOW FAR BELOW THE FEET A FLOOR MUST BE FOUND to end the post-load settle hold (yd).**
+ *
+ * The hold released on a downward probe of **200 yd**, which does not mean "there is a floor under
+ * me" -- it means "there is something, anywhere, in the world below me". Spawn INSIDE a building
+ * and the terrain beneath it streams in before the building's own floor does: the probe finds
+ * ground eighty yards down, the hold lifts, gravity starts, and the body is under the WMO floor by
+ * the time that floor arrives. Which is the owner's "проваливаюсь под текстуры после загрузки",
+ * exactly.
+ *
+ * **AND FIVE YARDS WAS STILL FOUR AND A HALF TOO MANY, because the probe is a CAPSULE CAST.** Its
+ * distance is not "how far below me is a surface" -- it is HOW FAR THE BODY MUST FALL TO LAND. A
+ * correctly seated body measures **zero**. So the reach is not a search radius; it is the drop we are
+ * willing to call "already standing on it".
+ *
+ * Measured, with the sink trap armed from world entry: the trap never fired and `penetration` was 0
+ * on every frame -- the body was never INSIDE anything. It simply fell from 82.0, where the hold
+ * released, to 80.57, and stood there on terrain with `nearest.normalZ` 0.9995. It fell 1.43 yd
+ * through the place the staircase was going to be. Five yards happily called that terrain "the floor
+ * I am standing on".
+ *
+ * Which is exactly the owner's own generalisation -- "проблема присутствует со всеми объектами, кроме
+ * земли wdt". The terrain streams first, so a spawn on ANY building or doodad releases on the ground
+ * beneath it and drops onto that instead. Nothing about it is specific to a staircase.
+ *
+ * Half a yard covers the gap between the server's Z and our own collision surface -- centimetres in
+ * practice -- and rejects a fall of 1.43.
+ *
+ * Nothing hangs on being conservative here, and that asymmetry is why the number can be tight: a
+ * probe that finds nothing does not freeze the body for ever -- it falls through to the two
+ * timeouts below it, which release on the terrain being registered, and then unconditionally.
+ */
+export const SETTLE_FLOOR_REACH = 0.5;
+
 /** Max contact iterations one collide-and-slide resolves before giving up on the remainder. */
 export const MAX_SLIDE_ITERATIONS = 4;
+
+/**
+ * **THE LONGEST HORIZONTAL STEP ONE SUBSTEP MAY RESOLVE (yd).**
+ *
+ * The owner's requirement, in his words: "нам нужно чтобы мы не проваливались под текстуры даже с
+ * низким фпс". A swept capsule cannot tunnel at any `dt`, so the failure at low frame rates is not
+ * leakage -- it is that everything else in a step is scaled by the travel. The slide gets four
+ * iterations however far it is going, the step-up looks ahead by one frame's travel, and the
+ * descent cap is `travel * 1.849`. At 27 fps his travel measured 0.35 yd, three times what a 60 fps
+ * frame resolves, so the same geometry is met with a third of the resolution.
+ *
+ * A substep bounded in DISTANCE makes all of that frame-rate independent: the body meets the world
+ * in steps of the same size whatever the clock does. 0.12 yd is one 60 fps walking frame at 7 yd/s,
+ * which is the resolution this mover has actually been tuned and measured at.
+ */
+export const MAX_SUBSTEP_TRAVEL = 0.12;
+
+/**
+ * **ONE. SUBSTEPPING IS OFF, AND THE MEASUREMENT THAT TURNED IT OFF IS WHY THE CONSTANT STAYS.**
+ *
+ * I shipped this at 3 with the cost stated as "up to three times the movement step on slow frames
+ * only" and asked for the number. The number came back **`ctl.move` 17.3 ms against 3.8** -- not
+ * three times but four and a half, and 13.5 ms added to a frame whose whole budget is 16.7. It is the
+ * largest single item in his profile, larger than `world.animate`.
+ *
+ * Worse than the multiplier: it is SELF-AMPLIFYING in exactly the way I wrote the ceiling to prevent
+ * and the ceiling did not prevent. A step that costs 13 ms more makes the frame longer, a longer frame
+ * travels further, and further travel buys the full three substeps every frame instead of on the rare
+ * slow one. The cap bounds the count; it cannot bound the feedback, because the feedback runs through
+ * the frame time and not through the count.
+ *
+ * The GOAL is still right and the owner asked for it: the body should meet the world at the same
+ * resolution whatever the clock does. But it cannot be bought at 4.5x, and the prerequisite is now
+ * clear -- ONE step has to be cheap first. At 3.8 ms it is already a fifth of the budget, and the
+ * reason for that is the next thing to measure, not to guess.
+ *
+ * Left as a constant rather than deleted so the mechanism, the measurement and the prerequisite stay
+ * where the next person will look. Set it above 1 only with `ctl.move` in front of you.
+ *
+ * ---
+ *
+ * The original reasoning, kept because it is still the argument FOR doing this once a step is cheap:
+ * they cost proportionally and the frame was already over budget.
+ *
+ * Measured on the owner's panel: `ctl.move` 3.8 ms on the abbey stairs, in a frame whose p50 is 19.3
+ * against a 16.7 budget. Substepping an over-budget frame without a ceiling is a feedback loop --
+ * a slow frame travels further, which buys more substeps, which makes the frame slower. Three is
+ * enough to cover 0.36 yd of travel, i.e. down to about 19 fps at walking speed, and bounds the
+ * added cost at twice one step rather than at whatever the frame rate collapses to.
+ *
+ * Past the ceiling the substeps simply get longer, and the sweep still cannot tunnel -- the
+ * degradation is in resolution, not in soundness.
+ */
+export const MAX_SUBSTEPS = 1;
 
 /**
  * Half the capsule's AXIS SEGMENT -- the distance from the centre to either cap centre. This, not

@@ -5,7 +5,7 @@
  * is the accepted-work regression this whole design is arranged around), and the plural must select
  * off the preceding number the way `NUM_FREE_SLOTS` relies on.
  */
-import { parseMarkup } from '../markup';
+import { linkRunEndingAt, parseMarkup } from '../markup';
 
 describe('FrameXML text escapes', () => {
   it('renders the owner\'s backpack tooltip strings', () => {
@@ -52,4 +52,23 @@ test('a hyperlink run is indexed into the plain text', () => {
   expect(links[0].link).toBe('item:3299:0:0');
   expect(links[0].text).toBe('[Belt]');
   expect(plain.slice(links[0].start, links[0].end)).toBe(links[0].text);
+});
+
+/**
+ * A HYPERLINK IS ONE CHARACTER TO AN EDITOR.
+ *
+ * The owner deleted a linked item and got the item id one character at a time: per-character deletion
+ * eats the closing `|h` first, which leaves an escape the parser can no longer hide. The assertion is
+ * that the range covers the COLOUR WRAPPER too -- stopping at `|H` would leave a dangling `|cff...`
+ * that tints the rest of the line, which is the failure that looks fixed.
+ */
+test('a hyperlink is deleted as one run, colour wrapper included', () => {
+  const link = '|cff9d9d9d|Hitem:2101:0:0:0:0:0:0:0:0:0|h[Belt]|h|r';
+  const text = `say ${link}`;
+  const run = linkRunEndingAt(text, text.length);
+  expect(run).not.toBeNull();
+  expect(text.slice(run!.start, run!.end)).toBe(link);
+  expect(text.slice(0, run!.start)).toBe('say ');
+  // Not a link end: an ordinary Backspace has to stay an ordinary Backspace.
+  expect(linkRunEndingAt('plain words', 11)).toBeNull();
 });

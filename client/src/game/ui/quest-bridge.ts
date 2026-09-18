@@ -103,6 +103,7 @@ import { questXpData } from '../pipeline/dbc/quest-xp-data';
 import {
   getItemTooltipSource, setItemTooltipSource, ItemTooltipInfo,
 } from './framexml/lua/api/items';
+import { retryTooltipFills } from './framexml/lua/methods/gametooltip';
 import type { GossipQuest } from '../../network/game/object/gossip';
 import { QUEST_STATE, QuestLogSlot } from '../../network/game/object/update-object/quest-log';
 
@@ -987,6 +988,42 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
   const questTooltip = (
     kind: string, a: number | string, b?: number,
   ): ItemTooltipInfo | null => {
+    /**
+     * `'questlink'` -- a `|Hquest:<id>|h` clicked in chat. Handled FIRST because it shares nothing
+     * with the two reward-item kinds below: its `a` is a quest id, not a panel index, and what it
+     * answers is a TITLE plus the objectives rather than an item.
+     *
+     * THE CONTENT IS OURS AND HAS TO BE: the real engine composes a quest tooltip itself, so no
+     * FrameXML file states what belongs in one. The title and the one-line objectives summary are what
+     * `SMSG_QUEST_QUERY_RESPONSE` gives us and what a reader clicking the link wants: what the quest
+     * is, and what it asks for.
+     *
+     * A COLD ID ASKS AND ANSWERS NULL -- the same contract `items.template` documents, where the read
+     * issues the query. `retryTooltipFills` on `questTemplate` below is what makes that recoverable;
+     * without it a first click would keep the empty frame for ever, which is the defect the ITEM link
+     * spent three rounds on.
+     */
+    if (kind === 'questlink') {
+      const questId = Number(a);
+      if (!Number.isFinite(questId) || questId <= 0) {
+        return null;
+      }
+      const linked = quest.templates.get(questId) ?? null;
+      if (linked === null) {
+        quest.queryTemplate(questId);
+        return null;
+      }
+      return {
+        name: linked.title,
+        // WHITE. `fillItemLines` colours the first line from `ITEM_QUALITY_COLORS[quality]` and 1 is
+        // Common -- a quest has no quality, so the neutral entry is the honest choice rather than a
+        // hue invented for it.
+        quality: 1,
+        lines: linked.objectivesText === ''
+          ? []
+          : [{ left: linked.objectivesText, wrap: true }],
+      };
+    }
     if (kind !== 'quest' && kind !== 'questlog') {
       return previousTooltipSource === null
         ? null
@@ -2319,6 +2356,15 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
      */
     fireEvent(vm, 'QUEST_LOG_UPDATE');
   };
+  /**
+   * A quest TEMPLATE landing refills a tooltip opened before it arrived.
+   *
+   * The item side rides `templatesChanged`; a quest link needs its own edge and `questTemplate` is it.
+   * See the `questlink` arm above for why a first click is always cold.
+   */
+  const onQuestTemplateTooltip = (): void => retryTooltipFills(vm);
+  quest.on('questTemplate', onQuestTemplateTooltip);
+
   items.on('templatesChanged', onTemplates);
   // THE COLLECT-OBJECTIVE TOAST's only trigger: 3.3.5a sends no add-item packet, so the bag IS the
   // event. See `onInventory`.
@@ -2569,6 +2615,7 @@ export function attachQuestBridge(vm: LuaVM, world: World, art: GlueArt): () => 
     quest.off('questGreeting', onGreeting);
     quest.off('questFinished', onFinished);
     quest.off('questTemplate', onTemplate);
+    quest.off('questTemplate', onQuestTemplateTooltip);
     quest.off('questUpdate', onUpdate);
     quest.off('questRewarded', onFinished);
     quest.off('questRewarded', reaskStatuses);

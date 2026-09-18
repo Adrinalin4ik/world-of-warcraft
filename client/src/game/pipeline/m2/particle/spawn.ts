@@ -46,6 +46,21 @@ export interface SpawnParams {
   lifespan: number;
   baseSpin: number;
   spinSpeed: number;
+  /**
+   * The emitter's inherited motion, in MODEL space and units per second, or 0 when the emitter does
+   * not author `INHERIT_EMITTER_MOTION`. Model space and not world, because that is the frame this
+   * function has already rotated the emission velocity into by the time it is added -- and the frame
+   * `integratePool` applies gravity in. The caller does the rotation; see `ParticleManager#animate`.
+   */
+  /**
+   * The emitter's world matrix ELEMENTS when the cloud is baked-at-birth (`MODEL_SPACE` clear), or
+   * undefined when it is re-oriented per frame. Only the linear 3x3 is read -- indices 0,1,2,4,5,6,
+   * 8,9,10 -- so rotation AND scale are baked while the translation stays `pack`'s job.
+   */
+  worldLinear?: ArrayLike<number> | null;
+  inheritX?: number;
+  inheritY?: number;
+  inheritZ?: number;
   zSource: number;
   // The emitter's own offset, in model space, relative to its bone (bone binding itself is a later
   // phase -- see the module docs on RuntimeEmitter). Applied to the generator's local spawn position
@@ -292,14 +307,33 @@ export const spawnParticle = (
   pool.velocity[base] = -pool.velocity[base + 1];
   pool.velocity[base + 1] = velocityX;
 
-  // The emitter's own offset in model space.
-  pool.position[base] += params.originX;
-  pool.position[base + 1] += params.originY;
-  pool.position[base + 2] += params.originZ;
-
   // Reorient out of the emitter's own frame and into model space. Done here, after zSource, because
   // zSource's direction is defined relative to the emitter -- rotating first would measure it against
   // the wrong axis.
+  //
+  // AND BEFORE THE EMITTER OFFSET IS ADDED, which is the fix for "партиклы и щит не согласованы".
+  // The offset used to be added FIRST and then rotated along with everything else, which rotates a
+  // MODEL-SPACE POINT by the bone's own rotation -- meaningless by definition, and this file's own
+  // comment thirteen lines up already states the rule it broke: the fixed +90 degree turn "applies to
+  // the kernel-relative vectors only -- the emitter offset below stays outside it". The offset has to
+  // stay outside the BASIS rotation for exactly the same reason.
+  //
+  // MEASURED, so the magnitude is not a guess: `params.position` is not bone-relative at all -- it is
+  // the bone's pivot expressed in model space, identical to it in every emitter of every model
+  // checked (`DemonArmor_Impact_Head` e0 pos (0.071, 0.001, 0.650) = bone 3 pivot exactly, and the
+  // same for all five; likewise `Fire_PreCast_Hand`, `Fireball_Missile_Low`, and the portal the
+  // `basis` doc already measured). So rotating it moved the emitter along an arc about the model
+  // origin whose radius is its own height up the model.
+  //
+  // On `DemonArmor_Impact_Head` that is up to a FULL UNIT and camera-dependent: emitter e4 hangs off
+  // bone 7, whose parent bone 2 is SPHERICAL-billboarded (flags 0x0008), so its (0.050, 0.006, 0.978)
+  // was being swung through an arbitrary camera-facing rotation -- z anywhere in +/-0.98. The other
+  // four sit under bone 0's cylindrical-Z billboard, which preserves z and swung them +/-0.07 in the
+  // horizontal. The mesh meanwhile rides bone 1 through the skinned palette and lands where authored.
+  // Mesh right, particles swinging by up to a head's height: exactly the owner's screenshot.
+  //
+  // THE TWO PATHS NOW READ THE SAME COMPOSITION. The mesh draws at `bonePos + boneRot . vertex`; an
+  // emitter's particle is born at `bonePos + boneRot . kernelOffset`. Same shape, same source.
   const basis = params.basis;
   if (basis) {
     const px = pool.position[base];
@@ -321,6 +355,12 @@ export const spawnParticle = (
     pool.velocity[base + 2] = basis[2] * vx + basis[6] * vy + basis[10] * vz;
   }
 
+  // The emitter's own offset, ALREADY IN MODEL SPACE -- added after the basis rotation, never through
+  // it. See the block above.
+  pool.position[base] += params.originX;
+  pool.position[base + 1] += params.originY;
+  pool.position[base + 2] += params.originZ;
+
   // The direction written above is a unit vector; scale it to the emission speed.
   const variation = 1 + params.speedVariation * (random() * 2 - 1);
   const speed = params.speed * variation;
@@ -328,6 +368,47 @@ export const spawnParticle = (
   pool.velocity[base] *= speed;
   pool.velocity[base + 1] *= speed;
   pool.velocity[base + 2] *= speed;
+
+  // THE INHERITED EMITTER MOTION (file flag 0x40) -- `integrate.ts#INHERIT_EMITTER_MOTION` carries
+  // the citation and the unit derivation. Added AFTER the speed scaling because it is a velocity in
+  // its own right, not a direction to be scaled: the reference adds it to the finished velocity.
+  //
+  // `variation` is REUSED rather than redrawn, and that is a stated choice: the reference writes the
+  // factor as `(1 + S11*speed_variation)`, the same form the emission speed just used, and places it
+  // in "the shape kernels' closing block" -- the same block. Whether the original draws one random
+  // or two is NOT pinned by anything I can read, and one draw is the reading that makes the inherit
+  // co-vary with the particle's own speed instead of jittering independently of it.
+  const ix = params.inheritX ?? 0;
+  const iy = params.inheritY ?? 0;
+  const iz = params.inheritZ ?? 0;
+  if (ix !== 0 || iy !== 0 || iz !== 0) {
+    pool.velocity[base] += ix * variation;
+    pool.velocity[base + 1] += iy * variation;
+    pool.velocity[base + 2] += iz * variation;
+  }
+
+  // BAKE THE EMITTER'S ORIENTATION, when the emitter is not `MODEL_SPACE`. See
+  // `integrate.ts#MODEL_SPACE`: the reference bakes bone/model rotation at birth for exactly this
+  // case, and `pack` then contributes only the translation. Applied LAST, after the basis rotation
+  // and after the speed scaling and the inherit, so it captures the finished model-space state --
+  // and to BOTH position and velocity, because a velocity left in model axes would re-introduce the
+  // rotation one integration step later.
+  const wl = params.worldLinear;
+  if (wl) {
+    const px = pool.position[base];
+    const py = pool.position[base + 1];
+    const pz = pool.position[base + 2];
+    pool.position[base] = wl[0] * px + wl[4] * py + wl[8] * pz;
+    pool.position[base + 1] = wl[1] * px + wl[5] * py + wl[9] * pz;
+    pool.position[base + 2] = wl[2] * px + wl[6] * py + wl[10] * pz;
+
+    const vx = pool.velocity[base];
+    const vy = pool.velocity[base + 1];
+    const vz = pool.velocity[base + 2];
+    pool.velocity[base] = wl[0] * vx + wl[4] * vy + wl[8] * vz;
+    pool.velocity[base + 1] = wl[1] * vx + wl[5] * vy + wl[9] * vz;
+    pool.velocity[base + 2] = wl[2] * vx + wl[6] * vy + wl[10] * vz;
+  }
 
   pool.age[slot] = 0;
   pool.lifespan[slot] = params.lifespan;

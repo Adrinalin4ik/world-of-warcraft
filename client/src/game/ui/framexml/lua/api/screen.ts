@@ -250,6 +250,25 @@ export function installScreenApi(vm: LuaVM, options: ScreenApiOptions = {}): voi
      * requirement and not as a reading of the game's data.
      */
     ['SPLITSTACK', 'SHIFT'],
+    /**
+     * `CHATLINK` -> SHIFT. **The owner's third requirement of this table: "дать возможность линковать
+     * мне по shift + клик".**
+     *
+     * It is the one gate on every shift-to-link path in the client, and all of them are one call:
+     *
+     *  - `HandleModifiedItemClick(link)` is `if ( IsModifiedClick("CHATLINK") ) then
+     *    ChatEdit_InsertLink(link) end` (`itembuttontemplate.lua:108-113`), reached from a BAG slot
+     *    (`containerframe.lua:739`) and from an EQUIPPED slot (`paperdollframe.lua:1250`);
+     *  - `SpellButton_OnModifiedClick` gates the spellbook the same way (`spellbookframe.lua:360`).
+     *
+     * So one entry turns on bags, equipment and the spellbook at once, and with the action unbound
+     * every one of them read `NONE`, answered false, and fell through to nothing.
+     *
+     * SOURCED THE SAME WAY THE TWO ABOVE ARE, AND NO BETTER: the engine ships this default in its own
+     * config and the client's options panel exposes only `AUTOLOOTTOGGLE`, `SELFCAST` and `FOCUSCAST`
+     * through `SetModifiedClick`. SHIFT is the owner's requirement, recorded as a requirement.
+     */
+    ['CHATLINK', 'SHIFT'],
   ]);
   const modifierHeld = (modifier: string): boolean => {
     if (modifier === 'SHIFT') {
@@ -438,6 +457,26 @@ function installCVars(vm: LuaVM): void {
      */
     ['lockActionBars', '1'],
     /**
+     * AUTO SELF-CAST: a helpful spell cast with a hostile target falls back to the caster.
+     *
+     * The owner's requirement, verbatim: "не могу кастовать дружественные заклинания, типа хил, пока
+     * в таргете противник, а должен мочь и такие эффекты должны автоматически применяться на меня."
+     * Read by `ui/cast-refusal.ts` -- the one cast door -- and consumed by
+     * `classes/cast-target.ts`'s second candidate, which is the real client's own
+     * `0x6e53d7` fallback to the active player.
+     *
+     * **`"1"` IS OURS AND THE SHIPPED DEFAULT IS `"0"`**, exactly like `lockActionBars` above. The
+     * reference records the engine's registered default as `"0"` (CVar name `0x870dc0`, gate
+     * `[0xceac34]+0x28`) and then defaults it ON itself, as a named deviation, because with it off an
+     * unbindable friendly cast falls into the targeting-cursor mode neither it nor this client models
+     * (`benilla-app/src/ui_action/cast_target.rs:211-222`). Same position, same choice, and the owner
+     * asked for it.
+     *
+     * It is a real CVar, so `SetCVar("autoSelfCast", "0")` restores the shipped behaviour with no
+     * code change.
+     */
+    ['autoSelfCast', '1'],
+    /**
      * THE TWO NAMEPLATE SWITCHES, seeded OFF.
      *
      * Not decoration: `Bindings.xml:544-573`'s three nameplate bindings do nothing but read and write
@@ -445,10 +484,20 @@ function installCVars(vm: LuaVM): void {
      * what documents that the names are the CVars the client's own Lua uses -- `GetCVarBool` already
      * answers false for an unset name, so behaviour is identical either way.
      *
-     * **OFF is 3.3.5a's own default**, and the evidence is the binding's own shape: the first `V` press
-     * takes the `else` arm and turns enemy plates ON, which is only the right first behaviour if they
-     * start off. (The value in a real install lives in `Config.wtf`, which the asset host does not
-     * serve -- `wtf/config.wtf` 404s -- so this is an inference from the client's Lua, not a read.)
+     * **ON, BY THE OWNER'S REQUIREMENT, and that overrules the inference this comment used to carry.**
+     * It argued OFF from the binding's shape -- the first `V` press takes the `else` arm and turns enemy
+     * plates on, which is only the right FIRST behaviour if they start off. That reasoning is still
+     * sound about 3.3.5a's shipped default and is no longer what this client wants: he asked for ally
+     * names and enemy health bars to be there without pressing anything.
+     *
+     * THE BINDINGS STILL WORK AND STILL DO WHAT THE CLIENT SAYS, which is the other half of his ask.
+     * From both-on, `V` (NAMEPLATES) takes the `else` arm and leaves enemies on with friends off;
+     * `SHIFT-V` mirrors it; `CTRL-V` (ALLNAMEPLATES) sees both set and turns both off, then on again.
+     * So all three keys toggle exactly as `bindings.xml:544-573` defines -- reading their bodies is how
+     * that was checked, not by pressing them.
+     *
+     * (A real install keeps the value in `Config.wtf`, which the asset host does not serve --
+     * `wtf/config.wtf` 404s -- so neither the old value nor this one is a read of the game's data.)
      */
     /**
      * THE WORLD MAP'S FOUR, and the first one was an ARITHMETIC ERROR on the owner's SHIFT-M:
@@ -525,8 +574,8 @@ function installCVars(vm: LuaVM): void {
      * wheel scrolls chat out of the box -- and it is what the owner is asking for.
      */
     ['chatMouseScroll', '1'],
-    ['nameplateShowEnemies', '0'],
-    ['nameplateShowFriends', '0'],
+    ['nameplateShowEnemies', '1'],
+    ['nameplateShowFriends', '1'],
     /**
      * `lastTalkedToGM`, EMPTY -- and its absence put a modal error dialog on the owner's screen.
      *

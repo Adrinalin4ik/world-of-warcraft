@@ -540,23 +540,32 @@ export function applyUnitFields(
   set('power', power.power);
   set('maxPower', power.maxPower);
 
-  // THE EQUIPPED WEAPONS, whose only consumer is the swing-clip pick (`game/classes/combat-anim.ts`).
-  // Two different fields because a creature and a player carry the same fact in different places:
+  // THE EQUIPPED WEAPONS, consumed by the swing-clip pick and the ranged-idle pick
+  // (`game/classes/combat-anim.ts#swingAnimation` / `#rangedLoadAnimation`). Two different fields
+  // because a creature and a player carry the same fact in different places:
   // `UNIT_VIRTUAL_ITEM_SLOT_ID` (+0x0032, main/off/ranged) for a creature or NPC, and
-  // `PLAYER_VISIBLE_ITEM_16/17_ENTRYID` for a player -- slot 16 is `EQUIPMENT_SLOT_MAINHAND`
-  // one-based. Both hold ITEM ENTRY ids on 3.3.5a. Not part of `fields`: nothing announces on a
-  // weapon swap and folding them in would dirty the unit-frame fingerprint for a fact no frame reads.
+  // `PLAYER_VISIBLE_ITEM_16/17/18_ENTRYID` for a player -- slot 16 is `EQUIPMENT_SLOT_MAINHAND`
+  // one-based, so 18 is `EQUIPMENT_SLOT_RANGED`. Both hold ITEM ENTRY ids on 3.3.5a. Not part of
+  // `fields`: nothing announces on a weapon swap and folding them in would dirty the unit-frame
+  // fingerprint for a fact no frame reads.
   //
   // `unit_virtual_item_slot_id` names only the FIRST of its three words in `UnitField`; the offhand
-  // is the next index up, read by number for that reason.
+  // and the ranged slot are the next two indices up, read by number for that reason.
   const virtualMain = values['unit_virtual_item_slot_id'];
   const virtualOff = values[String(UnitField.unit_virtual_item_slot_id + 1)];
+  // THE THIRD virtual word is the RANGED slot, which the comment above already named as being in
+  // that block -- it just was not being read. Same by-number access and for the same reason.
+  const virtualRanged = values[String(UnitField.unit_virtual_item_slot_id + 2)];
   const playerMain = values['player_visible_item_16_entryid'];
   const playerOff = values['player_visible_item_17_entryid'];
+  // Slot 18 one-based is `EQUIPMENT_SLOT_RANGED`, the next one up from the offhand's 17.
+  const playerRanged = values['player_visible_item_18_entryid'];
   if (typeof playerMain === 'number') unit.equippedMainhand = playerMain >>> 0;
   else if (typeof virtualMain === 'number') unit.equippedMainhand = virtualMain >>> 0;
   if (typeof playerOff === 'number') unit.equippedOffhand = playerOff >>> 0;
   else if (typeof virtualOff === 'number') unit.equippedOffhand = virtualOff >>> 0;
+  if (typeof playerRanged === 'number') unit.equippedRanged = playerRanged >>> 0;
+  else if (typeof virtualRanged === 'number') unit.equippedRanged = virtualRanged >>> 0;
 
   if (unitFieldTrace.enabled && unitFieldTrace.samples.length < TRACE_LIMIT) {
     unitFieldTrace.samples.push({

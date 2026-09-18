@@ -107,11 +107,14 @@ function inlineSlots(data: M2AnimData): boolean[] {
  * animated would put the model in the posing set for nothing.
  *
  * The `channelTrackIndex` rule this mirrors is the MATERIAL path
- * (`material-channels.ts#channelTrackIndex`). `InstanceAnim#solveBone` samples bone blocks with a
- * raw `trackFor(def.translation, seqIndex)` and ignores `globalSequenceID` entirely, so for a
- * global-sequence BONE block the exemption admits a key the bone sampler will index by `seqIndex`
- * and usually miss. That inconsistency predates this quarantine and is left alone deliberately:
- * classifying such a model animated is the conservative side of a bug that lives elsewhere.
+ * (`material-channels.ts#channelTrackIndex`), and as of the global-sequence bone port the BONE path
+ * mirrors it too -- `InstanceAnim.slotFor` / `#channelTimeMs`. This paragraph used to end "that
+ * inconsistency predates this quarantine and is left alone deliberately: classifying such a model
+ * animated is the conservative side of a bug that lives elsewhere", because `solveBone` sampled bone
+ * blocks with a raw `trackFor(def.translation, seqIndex)` and ignored `globalSequenceID`, so the
+ * exemption admitted a key the bone sampler indexed by `seqIndex` and usually missed. THAT BUG IS
+ * NOW FIXED, so the exemption is exactly right rather than conservatively right: a model classified
+ * animated on a global block's track 0 is a model whose bone sampler will actually read track 0.
  */
 function slotReadable(block: AnimBlock, slot: number, slots: boolean[]): boolean {
   return block.globalSequenceID > -1 ? slot === 0 : slots[slot] === true;

@@ -34,7 +34,9 @@ import type { ChatLine, ChatMessageHandler } from '../../network/game/object/cha
 import { LuaVM } from './framexml/lua/vm';
 import { fireEvent } from './framexml/lua/events';
 import { chatColourEvents } from './chat-colours';
-import { setChatSender } from './framexml/lua/api/chat';
+import { setChatSender, setDefaultLanguage } from './framexml/lua/api/chat';
+import raceClassData from '../pipeline/dbc/race-class-data';
+import languageData from '../pipeline/dbc/language-data';
 
 /** `chatTag` -> the string `arg6` carries. 0 is none; the rest are the client's own globals. */
 const TAG_TEXT: Record<number, string> = {
@@ -92,6 +94,43 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
     return name;
   };
 
+  /**
+   * **A CHANNEL LINE WAS DROPPED BY THE CLIENT, AND THESE TWO ARGUMENTS ARE WHY.**
+   *
+   * The owner: posting to a channel "не работает". The SEND was fine -- his probe answered
+   * `CHANNEL / 1` for the parsed attributes -- and the ECHO was thrown away on arrival, which looks
+   * identical from outside.
+   *
+   * `ChatFrame_MessageEventHandler` matches an incoming channel line against the frame's own
+   * `channelList` (`chatframe.lua:2694-2720`), and the loop is gated on
+   *
+   *     local channelLength = strlen(arg4);
+   *     ...
+   *     if ( channelLength > strlen(value) ) then
+   *
+   * where `value` is the BARE name from that list. This bridge passed the bare name as `arg4` too, so
+   * the test was `5 > 5` for `world` -- false, every time, for every channel. `found` stayed 0 and the
+   * handler returned without printing.
+   *
+   * `arg8` was 0 and that is fatal a second time over: the matched arm sets
+   * `infoType = "CHANNEL"..arg8`, so 0 asks `ChatTypeInfo` for `CHANNEL0`, which does not exist
+   * (`chatframe.lua:82-91` declares `CHANNEL1`..`CHANNEL10`) -- and a nil `info` is the other way that
+   * handler returns early.
+   *
+   * So the number is what both arguments were missing, and it comes from the ENGINE: the server speaks
+   * channel names only, and the numbering is a client convention `channel.ts` owns.
+   */
+  const channelNumber = (channel: string | null): number => (
+    channel === null || channel === '' ? 0 : (channels?.numberOf(channel) ?? 0)
+  );
+  const channelLabel = (channel: string | null): string => {
+    if (channel === null || channel === '') {
+      return '';
+    }
+    const number = channelNumber(channel);
+    return number > 0 ? `${number}. ${channel}` : channel;
+  };
+
   const raise = (line: ChatLine, senderName: string): void => {
     if (line.eventSuffix === null) {
       // An unknown type byte. Named on the console rather than dropped silently: it means the enum
@@ -106,11 +145,16 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
       // The language NAME, not the id: `chatframe.lua` compares it against `GetDefaultLanguage()` to
       // decide whether to show the "[Language]" prefix. Empty means universal, which suppresses it.
       '',
-      line.channel ?? '',
+      // `arg4` -- THE CHANNEL NAME WITH ITS NUMBER IN FRONT, and a bare one made the client DROP the
+      // line. See `channelLabel`.
+      channelLabel(line.channel),
       line.targetName ?? '',
       TAG_TEXT[line.chatTag] ?? '',
+      // `arg7`, the zone-channel id. 0 for a custom channel, which makes the matching loop fall
+      // through to comparing `arg9` -- the branch that matches here.
       0,
-      0,
+      // `arg8` -- THE CHANNEL NUMBER, and 0 was fatal twice over. See `channelLabel`.
+      channelNumber(line.channel),
       line.channel ?? '',
       0,
       lineId,
@@ -118,7 +162,51 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
     ]);
   };
 
+  /**
+   * `window.lastChatLinks` -- the hyperlink payloads the SERVER has sent us, newest last.
+   *
+   * **THE ONE AUTHORITY AVAILABLE ON A LINK'S SHAPE, and I have guessed at it twice.** The owner: a
+   * message containing only an item link "отправляет, но... нет ответа и он не отображает в чате" --
+   * the silent-refusal signature this project knows from widths, and a SPELL link in the same field
+   * sends perfectly. So the send path, the encoding and `SendChatMessage` are all ruled out by that
+   * asymmetry, and what differs is the item link's own field count, which a 3.3.5a server with strict
+   * link checking validates before broadcasting.
+   *
+   * No file settles the count: the engine composes item strings, nothing in the 264-file manifest
+   * builds one, and the reference is 1.12 and writes a different number. But the SERVER writes them
+   * too -- every loot message carries `|cff...|Hitem:...|h[Name]|h|r` -- so its own form arrives here
+   * in the ordinary course of play, and matching it needs no guess at all.
+   *
+   * `fields` is the count after the type, which is the number in question. Five entries, so a burst of
+   * loot does not push the interesting one out; no allocation while nothing has links, which is most
+   * lines.
+   */
+  const seenLinks: Array<{ payload: string; fields: number; type: string }> = [];
+  const captureLinks = (text: string): void => {
+    if (text.indexOf('|H') === -1) {
+      return;
+    }
+    const pattern = /\|H([^|]*)\|h/g;
+    let match = pattern.exec(text);
+    while (match !== null) {
+      const parts = match[1].split(':');
+      seenLinks.push({ payload: match[1], fields: parts.length - 1, type: parts[0] });
+      while (seenLinks.length > 5) {
+        seenLinks.shift();
+      }
+      match = pattern.exec(text);
+    }
+    (window as unknown as Record<string, unknown>).lastChatLinks = seenLinks;
+  };
+
+  /**
+   * The channel list, for the two arguments above. Null in an offline world, where no channel exists
+   * and `channelNumber` correctly answers 0 for everything.
+   */
+  const channels = world.game?.objectHandler?.channelHandler ?? null;
+
   const onLine = (line: ChatLine): void => {
+    captureLinks(line.text);
     if (!needsPlayerName(line)) {
       raise(line, line.senderName ?? '');
       return;
@@ -153,7 +241,43 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
    * be reordered by whose name query answered first. So the queue is walked once and only the entries
    * whose name is now known are taken, leaving the rest in place.
    */
+  /**
+   * THE PLAYER'S OWN TONGUE, joined from the descriptor and two DBCs. See
+   * `api/chat.ts#GetDefaultLanguage` for what the literal answer it replaces was costing.
+   *
+   * `UNIT_FIELD_BYTES_0` byte 0 is the `ChrRaces.dbc` id (`update-object/unit-fields.ts:298`), that
+   * row's `baseLanguage` is the language id, and `Languages.dbc` holds its localized name -- which is
+   * what the client compares against, not the id.
+   *
+   * PUSHED ON EVERY `unit:fields`, which this bridge already listens to for sender names, so the join
+   * costs two map reads on an edge that fires anyway. Idempotent: the same pair re-pushed is the same
+   * pair, and `setDefaultLanguage` is a `WeakMap.set`.
+   *
+   * BOTH FETCHES ARE ASKED FOR, because nothing else asks for `Languages.dbc` at all and
+   * `raceClassData` may not have been touched yet on a session where nothing read a race. The
+   * `ensureLoaded` pair is idempotent and dedupes internally, so this is one fetch each per session.
+   */
+  const pushLanguage = (): void => {
+    const raceId = world.player?.fields.race ?? null;
+    if (raceId === null) {
+      return;
+    }
+    const languageId = raceClassData.baseLanguage(raceId);
+    if (languageId === null) {
+      return;
+    }
+    const name = languageData.name(languageId);
+    if (name === null) {
+      return;
+    }
+    setDefaultLanguage(vm, { name, id: languageId });
+  };
+  void raceClassData.ensureLoaded().then(pushLanguage);
+  void languageData.ensureLoaded().then(pushLanguage);
+  pushLanguage();
+
   const onFields = (): void => {
+    pushLanguage();
     if (pending.length === 0) {
       return;
     }
@@ -209,6 +333,9 @@ export function attachChatBridge(vm: LuaVM, world: World): () => void {
   return () => {
     // The sender closes over this session; a stale one outliving it is the double-mount hazard.
     setChatSender(null);
+    // The snapshot closes over nothing, but a stale language outliving its session would be read by
+    // the next mount as if it were that character's. Cleared for the same reason the sender is.
+    setDefaultLanguage(vm, null);
     chat.removeListener('line', onLine);
     world.removeListener('unit:fields', onFields);
     pending.length = 0;

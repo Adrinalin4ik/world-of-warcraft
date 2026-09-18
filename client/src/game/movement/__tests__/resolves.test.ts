@@ -100,7 +100,19 @@ describe('groundedStep', () => {
     expect(out.snap!.hit).toBeNull();
   });
 
-  it('lets a committed step-up BE the frame, skipping the slide and the snap', () => {
+  /**
+   * **THIS TEST ASSERTED THE TELEPORT, and its old name was the design it was guarding: "lets a
+   * committed step-up BE the frame, skipping the slide and the snap".**
+   *
+   * That is precisely what the reference reversed. The probe's landing sits a full body length
+   * downrange, so making it the frame put a horizontal lurch in every step-up; and skipping the
+   * snap is what let a wrong certification strand the body in the air with nothing to undo it.
+   *
+   * The commit is now a vertical rise, after which the ORDINARY slide and the ORDINARY settle own
+   * the frame -- so `snap` being present is the corrected behaviour, and it is asserted as such:
+   * this is the mechanism that makes a mistaken certification self-correcting.
+   */
+  it('rises on a committed step-up and lets the ordinary slide and snap own the frame', () => {
     const r = (70 * Math.PI) / 180;
     const steepFace = v3(-Math.sin(r), 0, Math.cos(r));
     let horizontalProbes = 0;
@@ -119,7 +131,28 @@ describe('groundedStep', () => {
     expect(out.climb).not.toBeNull();
     expect(out.climb!).toBeGreaterThan(0);
     expect(out.stepUpVerdict).toBe('commit');
-    expect(out.snap).toBeNull();
+    // The settle ran, which is the correction: it reads back past the height just gained, so it
+    // finds the obstacle's top or the ground we left rather than leaving the body popped.
+    expect(out.snap).not.toBeNull();
+  });
+
+  /**
+   * **THE OWNER'S FALL, as the drop trap measured it: a floor 1.5 yd below, taken whole in one
+   * frame.** 1.426 yd of height gone between two frames, which is what "проваливаюсь под текстуры"
+   * is from the inside.
+   *
+   * The reach may see that far -- that is what keeps the body grounded on a face steeper than one
+   * frame can follow. The DESCENT may not spend it. Both halves are asserted because either alone is
+   * the bug: an uncapped descent is the teleport, and a cap without `stepDown` is the same fall
+   * arriving through the ground probe instead.
+   */
+  it('descends one cone per frame when the floor is deeper than a frame may fall', () => {
+    const travel = 7 / 60;
+    const cone = travel * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+    const out = groundedStep(floorBelow(1.5), v3(0, 0, 10), v3(7, 0, 0), 1 / 60);
+
+    expect(10 - out.center.z).toBeCloseTo(cone, 5);
+    expect(out.stepDown).toBe(true);
   });
 
   it('carries the step-up verdict through even when it did not commit', () => {

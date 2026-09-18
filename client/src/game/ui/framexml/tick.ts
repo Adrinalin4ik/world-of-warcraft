@@ -11,6 +11,8 @@
 import { Widget } from '../widget';
 import { caretOffset } from '../text';
 import { FocusSink, FrameRegistry } from './lua/object';
+import { parseMarkup, plainIndexOf, rawIndexOf } from '../markup';
+import { rectOf } from '../rects';
 
 /**
  * The caret, OURS.
@@ -155,6 +157,152 @@ function buildSelection(registry: FrameRegistry, box: Widget): Widget | null {
  * it adds no dirty frames: a selection's rect is static while it stands, and the CARET beside it already
  * dirties the fingerprint twice a second by blinking. The highlight itself deliberately does not blink.
  */
+/** What is on screen in a single-line box, and where it starts. See `editBoxWindow`. */
+interface EditBoxWindow {
+  /** The RAW text the region is given -- the window, with its escapes intact. */
+  shown: string;
+  /** The PLAIN index the window starts at. */
+  from: number;
+  /** The caret, in plain characters from the window start. */
+  caretIn: number;
+}
+
+/** Per-box memo for `editBoxWindow`, keyed on everything the answer depends on. */
+const windowCache = new WeakMap<Widget, { key: string; value: EditBoxWindow }>();
+
+/**
+ * THE HORIZONTAL WINDOW of a single-line edit box: what is on screen, and where it starts.
+ *
+ * A single-line field does not wrap (`methods/kinds.ts#SetTextRegion`), so text longer than the box
+ * has to go somewhere. The engine slides it and clips at the edge with the caret kept visible; before
+ * this it ran off the right side of the chat box and across the world, which is what the owner
+ * photographed.
+ *
+ * ONE FUNCTION, read by three callers -- the text mirror, the caret and the selection. That is the
+ * point of it: the three used to measure `displayText` independently, and any disagreement between
+ * them puts the caret under the wrong letter. Now there is one window and one offset.
+ *
+ * THE AVAILABLE WIDTH IS THE BOX'S RESOLVED RECT minus its text insets, and NOT `box.width`: the chat
+ * field authors `Size x="5"` and takes its real width from two opposing anchors
+ * (`floatingchatframe.xml:682`), so the authored value is 5 and useless. `rectOf` answers what is
+ * actually on screen -- the same source `GetLeft`/`GetRight` use, and the same lesson the slider
+ * getter's zero taught.
+ *
+ * THE WINDOW IS FED TO THE REGION AS **RAW** TEXT, mapped back through `rawIndexOf`, so a link inside
+ * it keeps its colour escapes rather than arriving as a bare `[Name]`.
+ *
+ * COST: the fast path is a single `measureText` of the whole string, and it returns before any
+ * bisection whenever the text fits -- which is every box on every screen except a chat line being
+ * typed past the edge. Nothing here allocates while the window is unchanged.
+ */
+export function editBoxWindow(box: Widget): EditBoxWindow {
+  const raw = box.displayText;
+  /**
+   * **AN INVISIBLE BOX GETS NO RECT LOOKUP, AND SKIPPING IT IS WORTH 20 MS A FRAME.**
+   *
+   * MEASURED by the owner after this function landed: `uiTickCensus` reported `editBoxMs: 20.92` per
+   * frame, against a census whose own comment says the edit-box work is "expected to be nothing".
+   *
+   * The cause is in `rects.ts#rectOf` and its own header states it: a widget NOT in the last draw
+   * list falls through to "resolve the whole tree once and answer from that", and that path ends
+   * "Nothing here runs per frame". This function broke that assumption -- it asked for a rect once
+   * per edit box per tick, and six of the seven chat edit boxes are hidden, so every tick missed the
+   * draw list and paid a full layout resolve.
+   *
+   * A hidden box needs no window: nothing of it is on screen, its caret is not drawn (`placeCaret`
+   * returns unless the box holds focus) and its region's text is only read when it becomes visible,
+   * at which point this runs again. So the guard is not a shortcut -- there is no answer to compute.
+   *
+   * The visible one is IN the draw list by definition, so its `rectOf` is a map lookup and the
+   * expensive path is never reached at all.
+   */
+  if (!box.visible) {
+    box.textScroll = 0;
+    return { shown: raw, from: 0, caretIn: plainIndexOf(raw, box.caret) };
+  }
+  const spec = box.textRegion?.font ?? null;
+  const rect = rectOf(box.id);
+  const available = rect === null
+    ? 0
+    : rect.width - box.textInsets.left - box.textInsets.right;
+
+  /**
+   * MEMOISED, and that is not an optimisation but the difference between a feature and a frame-budget
+   * hole.
+   *
+   * `caretOffset` measures through a 2D context and is NOT cached (`text.ts:376-390` -- unlike
+   * `measureText`, which is). This function is called three times per tick for the focused box -- the
+   * mirror, the caret, the selection -- and once per tick for every other edit box in the tree, of
+   * which the world UI has ten. Unmemoised that is a canvas measurement per box per frame for a value
+   * that changes only on a keystroke.
+   *
+   * The key is everything the answer depends on: the string, the caret and the width. A resize
+   * therefore recomputes, which is right -- the window depends on the box, not only on the text.
+   */
+  const key = `${raw}|${box.caret}|${available}`;
+  const cached = windowCache.get(box);
+  if (cached !== undefined && cached.key === key) {
+    return cached.value;
+  }
+
+  const plain = parseMarkup(raw).plain;
+  const caretPlain = plainIndexOf(raw, box.caret);
+  const answer = (value: EditBoxWindow): EditBoxWindow => {
+    windowCache.set(box, { key, value });
+    box.textScroll = value.from;
+    return value;
+  };
+  if (spec === null || available <= 0
+    || caretOffset(plain, spec, 1, plain.length) <= available) {
+    // Everything fits, or there is nothing to measure with: no window and no bisection.
+    return answer({ shown: raw, from: 0, caretIn: caretPlain });
+  }
+
+  /**
+   * The smallest window start that keeps the caret inside, BY BISECTION.
+   *
+   * `caretOffset(plain, ..., from)` is non-decreasing in `from`, so the condition
+   * `caretPx - offset(from) <= available` is monotonic and bisects. The first draft of this walked
+   * `from` up one character at a time and re-measured BOTH ends each step: 255 iterations x 2
+   * uncached canvas measurements, per frame, for one box. Eight probes instead.
+   *
+   * `caretPx` is hoisted for the same reason -- it does not depend on `from` and was being remeasured
+   * inside the loop.
+   */
+  const caretPx = caretOffset(plain, spec, 1, caretPlain);
+  let low = Math.min(box.textScroll, caretPlain);
+  let high = caretPlain;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (caretPx - caretOffset(plain, spec, 1, mid) > available) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  const from = low;
+  return answer({
+    // RAW from the same boundary, so escapes inside the window survive. `rawIndexOf` bisects too,
+    // which is why it is reached only on this path.
+    shown: from === 0 ? raw : raw.slice(rawIndexOf(raw, from)),
+    from,
+    caretIn: caretPlain - from,
+  });
+}
+/**
+ * Mirror the box's value into its text region, through the window above.
+ *
+ * The two runtimes used to assign `textRegion.text = box.displayText` themselves. Routing both
+ * through here is what makes the window, the caret and the selection agree -- and it is the only
+ * place that assignment now happens.
+ */
+export function mirrorEditBoxText(box: Widget): void {
+  if (box.textRegion === null) {
+    return;
+  }
+  box.textRegion.text = editBoxWindow(box).shown;
+}
+
 export function placeSelection(box: Widget, selection: Widget | null, input: FocusSink | null): void {
   if (selection === null) {
     return;
@@ -164,10 +312,30 @@ export function placeSelection(box: Widget, selection: Widget | null, input: Foc
     selection.shown = false;
     return;
   }
-  const start = Math.min(box.selectionAnchor, box.caret);
-  const end = Math.max(box.selectionAnchor, box.caret);
-  const left = caretOffset(box.displayText, spec, 1, start);
-  const right = caretOffset(box.displayText, spec, 1, end);
+  /**
+   * MEASURED INSIDE THE WINDOW AND OVER THE PLAIN TEXT, and it used to be neither.
+   *
+   * Against the raw string a selection covering an item link was ~60 characters wide instead of the 8
+   * that are drawn, and against the unwindowed string it was offset by whatever had scrolled off the
+   * left. Ctrl+A is where that shows: the model was already right (`input.ts` sets anchor 0 and caret
+   * to the end) and the highlight was the half that lied.
+   *
+   * CLAMPED to the window, so a selection running off either edge paints to the edge and no further.
+   */
+  const raw = box.displayText;
+  const plain = parseMarkup(raw).plain;
+  const window = editBoxWindow(box);
+  const startPlain = plainIndexOf(raw, Math.min(box.selectionAnchor, box.caret));
+  const endPlain = plainIndexOf(raw, Math.max(box.selectionAnchor, box.caret));
+  const shownPlain = plain.slice(window.from);
+  const start = Math.max(0, Math.min(startPlain - window.from, shownPlain.length));
+  const end = Math.max(0, Math.min(endPlain - window.from, shownPlain.length));
+  if (end <= start) {
+    selection.shown = false;
+    return;
+  }
+  const left = caretOffset(shownPlain, spec, 1, start);
+  const right = caretOffset(shownPlain, spec, 1, end);
   selection.anchors[0].x = left;
   selection.setSize(Math.max(0, right - left), spec.size ?? 12);
   selection.shown = true;
@@ -202,7 +370,18 @@ export function placeCaret(
     caret.shown = false;
     return;
   }
-  caret.anchors[0].x = caretOffset(box.displayText, spec, 1, box.caret);
+  /**
+   * OVER THE PLAIN TEXT, because that is what the glyphs are.
+   *
+   * The box stores the raw escaped string -- an item link is ~60 characters of which ~8 are drawn --
+   * and the raster parses it. Measuring the raw prefix put the caret far right of the text it belongs
+   * to, which is the owner's "курсор улетает после вставки". `plainIndexOf` maps the caret through the
+   * SAME parse that produced the glyphs; see its header for why it reuses `parseMarkup` rather than
+   * walking the escapes again.
+   */
+  const window = editBoxWindow(box);
+  const shown = parseMarkup(window.shown).plain;
+  caret.anchors[0].x = caretOffset(shown, spec, 1, window.caretIn);
   caret.shown = true;
 }
 
@@ -216,7 +395,25 @@ export function placeCaret(
  * real `<NormalTexture>`/`<HighlightTexture>` regions, long after the load, and a boot-time snapshot
  * would leave every one of them a painted picture that never lights or presses.
  *
- * The cost is one array walk of the widget tree per frame, beside the one `drawList` already does.
+ * **THE WALK IS NOT A PERFORMANCE PROBLEM AND THIS IS THE MEASUREMENT, so that it stops being
+ * proposed as one.** The owner's `uiTickCensus`, 2157 frames standing still with no panels open:
+ * **`buttonMs` 0.14 ms** over **46 visited buttons**, inside a `ui.tick` of 5.5 ms. That is 2.5% of
+ * the tick and 0.8% of a 16.7 ms frame.
+ *
+ * Two rounds proposed replacing it -- most recently with a port of the reference's own ticked-kind
+ * registry (`samples/benilla/crates/benilla-ui/src/script/tick.rs:152-154`, `widget/mod.rs:413`),
+ * which really is what the reference does and really would remove the walk. It was cancelled on this
+ * number: the reference had thousands of frames of two ticked kinds to sweep, this has 46 buttons
+ * after the `visitHidden` prune, and a flat registry here would have to recover EFFECTIVE VISIBILITY
+ * per button by walking each one's parent chain -- which is the exact cost pattern the collision
+ * providers were just cured of. It would plausibly have been slower, to save 0.14 ms.
+ *
+ * The cost that WAS worth finding sits one layer down and is not in this file: entering Lua at all.
+ * `lua/scripts.ts#callWithBothConventions` measured 16.04 us against the 1.51 us `lua_pcall` it
+ * wraps (`__bench__/script-call.test.ts`). A tick's cost is its CALLS, not its walk.
+ *
+ * The cost here is one array walk of the widget tree per frame, beside the one `drawList` already
+ * does.
  *
  * `visitHidden = false` prunes a hidden subtree, and that is the world runtime's whole reason for the
  * parameter: on the glue screens the tree is ~450 widgets and pruning would save nothing, while

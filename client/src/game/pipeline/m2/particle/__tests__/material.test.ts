@@ -84,3 +84,20 @@ describe('ParticleMaterial alphaKey uniform', () => {
     expect(material.uniforms.alphaKey.value).toBe(0.0);
   });
 });
+
+describe('ParticleMaterial#ready', () => {
+  it('resolves when the texture load FAILS, so it can be returned into a chain with no catch', async () => {
+    // THE LOAD-BEARING PROPERTY. Both doodad lanes register from a `.then` that has no `.catch` of
+    // its own (`world/doodad-manager.js#loadDoodad`, `pipeline/wmo/index.js#processLoadDoodad`), and
+    // they now RETURN this handle. A handle that rejected would turn a missing particle texture into
+    // an unhandled rejection at zone-load scale -- the exact class of problem the readiness handle was
+    // added to remove.
+    const loader = require('../../../texture-loader').default;
+    loader.load.mockImplementationOnce(() => Promise.reject(new Error('404')));
+
+    const material = new ParticleMaterial('MISSING\TEXTURE.BLP', PARTICLE_BLEND_MODE.ADD);
+
+    // `resolves` and not a try/catch: the assertion is that awaiting it does not throw.
+    await expect(material.ready).resolves.toBeUndefined();
+  });
+});
