@@ -68,6 +68,19 @@ import {
 import { eventListeners, fireEvent } from './framexml/lua/events';
 import { getScriptHandler } from './framexml/lua/scripts';
 import { reconcileScrollRanges } from './framexml/lua/methods/scroll';
+import { createQuadMaterial } from './material';
+import { ModelBooth } from './scene/model-booth';
+import { resolveUnitToken } from '../world/unit-tokens';
+import { publishArtSink, clearArtSink } from './runtime-art';
+import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
+import { attachTargetBridge } from './target-bridge';
+import { dispatchBinding } from './framexml/lua/api/bindings';
+import { cancelCursor, dropCursorOnWorld, getCursor } from './framexml/lua/api/cursor';
+import { cvarBool } from './framexml/lua/api/screen';
+import { gameTime } from './framexml/lua/compat';
+import type World from '../world';
+import type { WorldRuntime } from './framexml/world-runtime';
+import type { BoothSubject } from './scene/model-booth';
 
 /**
  * **WHAT ELSE IS INSIDE `ui.tick`** -- `window.uiPollCensus()`, and it exists because the section
@@ -125,19 +138,6 @@ if (typeof window !== 'undefined') {
     pollCensus.minimapMs = 0;
   };
 }
-import { createQuadMaterial } from './material';
-import { ModelBooth } from './scene/model-booth';
-import { resolveUnitToken } from '../world/unit-tokens';
-import { publishArtSink, clearArtSink } from './runtime-art';
-import { attachUnitBridge, seedUnitSnapshots } from './unit-bridge';
-import { attachTargetBridge } from './target-bridge';
-import { dispatchBinding } from './framexml/lua/api/bindings';
-import { cancelCursor, dropCursorOnWorld, getCursor } from './framexml/lua/api/cursor';
-import { cvarBool } from './framexml/lua/api/screen';
-import { gameTime } from './framexml/lua/compat';
-import type World from '../world';
-import type { WorldRuntime } from './framexml/world-runtime';
-import type { BoothSubject } from './scene/model-booth';
 
 /** The offscreen target's clear colour. Fully transparent, so only what the UI draws is composited. */
 const TRANSPARENT = new THREE.Color(0, 0, 0);

@@ -3,6 +3,10 @@ import * as THREE from 'three';
 import DebugPanel from '../../pages/game/debug/debug';
 import { doodadFadeAlpha } from '../pipeline/m2/fade/laws';
 import { FULL_SCREEN_RECT } from '../pipeline/wmo/portal/rect';
+import { WmoFlags } from './wmo-flags';
+import THREEUtil from '../utils/three-util';
+import { PlaneHelper } from '../utils/plane-helper';
+import { vec4 } from 'gl-matrix';
 
 /**
  * How many consecutive EXTERIOR frames still re-seed the last interior. See the latch in `cull`.
@@ -42,10 +46,6 @@ export const portalTrace = {
 if (typeof window !== 'undefined') {
   window.portalTrace = portalTrace;
 }
-import { WmoFlags } from './wmo-flags';
-import THREEUtil from '../utils/three-util';
-import { PlaneHelper } from '../utils/plane-helper';
-import { vec4 } from 'gl-matrix';
 
 export const ObjectsManager = [];
 
