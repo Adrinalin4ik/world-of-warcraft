@@ -44,6 +44,13 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A hang here used to burn the runner's whole six-hour ceiling before anyone saw a failure:
+    # run 34809351297 (2026-09-14) sat in `Test` from 05:22:53 to 11:21:46 and was killed by the
+    # limit, so `Build`, `configure-pages` and `upload-pages-artifact` never ran at all. The step
+    # that hangs is the one to fix, but a ceiling an order of magnitude below the platform's turns
+    # a hang into a red run in minutes instead of a wasted morning. Install + typecheck + test +
+    # build measured about 2 minutes on that same run before it stalled.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: client

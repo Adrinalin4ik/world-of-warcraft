@@ -1,0 +1,29 @@
+# The tree carries gitlinks for these two native tools and had no `.gitmodules` beside them, so
+# `git submodule update --init --recursive` died with
+#
+#   fatal: No url found for submodule path 'BLPConverter' in .gitmodules
+#
+# That is what breaks GitHub's own `pages-build-deployment` on every master push (run 35313323959,
+# 2026-09-18) and what makes `git clone --recursive` fail for anyone new to the repo.
+#
+# The URLs are https, and neither matches what the local checkouts carry: `BLPConverter`'s origin is
+# `git://github.com/Kanma/BLPConverter.git`, and GitHub disabled the unauthenticated git:// protocol
+# in 2022 so that spelling can no longer clone at all; `StormLib`'s is `git@github.com:...`, which
+# needs an SSH key a CI runner does not have. Both repositories are public, so https needs no
+# credentials. Same reasoning the deploy workflow already applies to the `jsbn` git dependency.
+#
+# STILL BROKEN, and this file does not fix it: `BLPConverter`'s pinned commit
+# 12265ac7c9eb06c3cd0446efc4df682c782e8cd5 EXISTS NOWHERE BUT THE OWNER'S MACHINE. It is reachable
+# only from that clone's local `refs/heads/master`, `GET /repos/Kanma/BLPConverter/commits/12265ac`
+# answers 422, and it is a 2024-01-20 commit of local CMake build output -- `CMakeCache.txt`,
+# `CMakeFiles/`, compiled binaries -- committed by accident and never pushed. So a fresh checkout now
+# resolves the URL and then fails with `reference is not a tree` instead. Its parent
+# b947c721dc219d9e982adcfc3f7bdb339564a75b IS upstream ("Fix the display of the BLP version",
+# 2017-06-26), so re-pinning the gitlink to the parent closes it; that edit is the owner's call
+# because it changes recorded repository content. `StormLib`'s pin 9a17c62 is upstream and fine.
+[submodule "BLPConverter"]
+	path = BLPConverter
+	url = https://github.com/Kanma/BLPConverter.git
+[submodule "StormLib"]
+	path = StormLib
+	url = https://github.com/ladislav-zezula/StormLib.git
